@@ -32,12 +32,12 @@ jobs:
     runs-on: ubuntu-22.04
     strategy:
       matrix:
-        SET: [ssr, docker]
+        SET: [ssr, docker]      # 两个版本
     steps:
-      - name: Checkout
-        uses: actions/checkout@main
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-      - name: Setup Environment
+      - name: Install build environment
         run: |
           sudo rm -rf /etc/apt/sources.list.d
           wget https://raw.githubusercontent.com/friendlyarm/build-env-on-ubuntu-bionic/master/install.sh
@@ -45,22 +45,20 @@ jobs:
           sudo bash ./install.sh
           git clone https://github.com/friendlyarm/repo
           sudo cp repo/repo /usr/bin/
-
-          # 增加 swap
           sudo fallocate -l 4G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
           echo "Swap enabled: $(swapon --show)"
 
-      - name: Download source (rk3399)
+      - name: Download FriendlyWrt source
         run: |
-          mkdir project && cd project
+          mkdir -p project && cd project
           repo init --depth=1 -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v23.05 \
-              -m rk3399.xml --repo-url=https://github.com/friendlyarm/repo --no-clone-bundle
+            -m rk3399.xml --repo-url=https://github.com/friendlyarm/repo --no-clone-bundle
           repo sync -c --no-clone-bundle
 
-      - name: Apply config
+      - name: Apply configuration
         run: |
           cd project
           case "${{ matrix.SET }}" in
