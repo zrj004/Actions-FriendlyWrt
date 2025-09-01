@@ -1,48 +1,48 @@
-name: FriendlyWrt 每周构建
+name: FriendlyWrt 构建与发布（含 SD 卡镜像）
 
 on:
   schedule:
-    - cron: '0 2 * * 1'   # 每周一 2:00
-  workflow_dispatch:
+    - cron: '0 3 * * 0'  # 每周日 3:00 UTC
+  workflow_dispatch:     # 支持手动触发
 
 jobs:
   prepare_release:
     runs-on: ubuntu-22.04
     steps:
-      - name: 生成发布标签
+      - name: 生成 Release 标签
         id: release_tag
         run: |
-          RELEASE_TAG="FriendlyWrt-$(date +'%Y-%m-%d')"
-          echo "RELEASE_TAG=${RELEASE_TAG}" >> $GITHUB_ENV
-          echo "##[set-output name=release_tag;]$RELEASE_TAG"
+          release_tag="FriendlyWrt-$(date +%Y-%m-%d)"
+          echo "生成标签: $release_tag"
+          echo "release_tag=$release_tag" >> $GITHUB_OUTPUT
 
-      - name: 创建 Release
+      - name: 创建空 Release
         id: release
         uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ steps.release_tag.outputs.release_tag }}
           draft: false
           prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  build_friendlywrt:
+    outputs:
+      release_tag: ${{ steps.release_tag.outputs.release_tag }}
+
+  build_rootfs_img:
     needs: prepare_release
     runs-on: ubuntu-22.04
     strategy:
       matrix:
         VERSION: ['23.05', '24.10']
-        SET: ['docker', 'non-docker']
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
+        SET: [docker, non-docker]
+        CPU: [rk3399]
 
-      - name: 初始化环境
+    steps:
+      - name: 安装依赖
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential unzip wget git python3-distutils libncurses5-dev zlib1g-dev
-          curl -fsSL https://get.docker.com | sh || true
-          sudo usermod -aG docker $USER
+          sudo apt update
+          sudo apt install -y unzip wget git build-essential libncurses5-dev libssl-dev qemu-user-static parted
 
       - name: 下载 FriendlyWrt rootfs
         uses: robinraju/release-downloader@v1.6
@@ -57,37 +57,59 @@ jobs:
           tarBall: false
           zipBall: false
 
-      - name: 解压 rootfs
+      - name: 解压 Rootfs
         run: |
           mkdir -p project
           tar xvzf ./friendlywrt/rootfs-friendlywrt-${{ matrix.VERSION }}${{ matrix.SET == 'docker' && '-docker' || '' }}.tgz -C project
 
-      - name: 仅拉 SSR Plus+ feed
+      - name: 拉取 SSR Plus+ feed
         run: |
           cd project
-          mkdir -p package/custom
+          mkdir -p feeds/custom
           echo "src-git custom https://github.com/ophub/luci-app-ssr-plus.git" > feeds.conf.custom
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+
+      - name: 编译 Rootfs
+        run: |
+          cd project
           make defconfig
+          make -j$(nproc)
 
-      - name: 编译 FriendlyWrt
+      - name: 打包 Rootfs
+        run: |
+          mkdir -p artifact
+          ROOTFS_FILE=rootfs-friendlywrt-${{ matrix.VERSION }}${{ matrix.SET == 'docker' && '-docker' || '' }}.tgz
+          cd project
+          tar czf ../artifact/$ROOTFS_FILE .
+
+      - name: 生成 SD 卡镜像
         run: |
           cd project
-          make -j$(nproc) || make -j1 V=s
+          IMG_FILE=NanoPiM4-FriendlyWrt-${{ matrix.VERSION }}${{ matrix.SET == 'docker' && '-docker' || '' }}.img
+          # 创建空镜像 4G
+          dd if=/dev/zero of=../artifact/$IMG_FILE bs=1M count=4096
+          # 创建分区
+          parted ../artifact/$IMG_FILE mklabel msdos
+          parted ../artifact/$IMG_FILE mkpart primary ext4 1MiB 100%
+          mkfs.ext4 -F ../artifact/$IMG_FILE
+          # 挂载镜像
+          mkdir -p mnt
+          sudo mount -o loop,offset=1048576 ../artifact/$IMG_FILE mnt
+          sudo cp -a ./* mnt/
+          sync
+          sudo umount mnt
+          rm -rf mnt
 
-      - name: 打包 rootfs
-        run: |
-          cd project
-          mkdir -p ../artifact
-          ROOTFS_TGZ="rootfs-friendlywrt-${{ matrix.VERSION }}${{ matrix.SET == 'docker' && '-docker' || '' }}.tgz"
-          tar czf ../artifact/${ROOTFS_TGZ} *
-
-      - name: 上传 rootfs 到 Release
+      - name: 上传 Rootfs 和镜像到 Release
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ./artifact/${ROOTFS_TGZ}
-          asset_name: ${ROOTFS_TGZ}
+          file: |
+            ./artifact/rootfs-friendlywrt-${{ matrix.VERSION }}${{ matrix.SET == 'docker' && '-docker' || '' }}.tgz
+            ./artifact/NanoPiM4-FriendlyWrt-${{ matrix.VERSION }}${{ matrix.SET == 'docker' && '-docker' || '' }}.img
+          asset_name: |
+            rootfs-friendlywrt-${{ matrix.VERSION }}${{ matrix.SET == 'docker' && '-docker' || '' }}.tgz
+            NanoPiM4-FriendlyWrt-${{ matrix.VERSION }}${{ matrix.SET == 'docker' && '-docker' || '' }}.img
           tag: ${{ needs.prepare_release.outputs.release_tag }}
           overwrite: true
