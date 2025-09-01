@@ -1,14 +1,14 @@
-name: 构建 FriendlyWrt RK3399
+name: 构建 FriendlyWrt NanoPi M4
 
 on:
   workflow_dispatch:   # 手动触发
-  schedule:            # 定时任务，每周执行一次
-    - cron: "0 20 * * 6"   # UTC 时间周六 20 点 -> 北京时间周日 4 点
+  schedule:
+    - cron: "0 20 * * 6"   # 每周日北京时间凌晨4点（UTC周六20点）
 
 env:
   CPU: rk3399
-  FRIENDLYWRT_VERSION: v24.10
-  DATE: ${{ github.run_id }}-${{ github.run_number }}
+  FRIENDLYWRT_BRANCH: master-v24.10   # 使用可用的分支
+  DATE: ${{ github.run_number }}
 
 jobs:
   build:
@@ -21,7 +21,14 @@ jobs:
       - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: 清理旧的 Release 和 Artifact
+      - name: 安装依赖工具
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential git wget curl unzip xz-utils \
+            libncurses5-dev zlib1g-dev python3-distutils rsync ccache
+
+      - name: 清理旧 Release 和 Artifact
         uses: dev-drprasad/delete-older-releases@v0.3.2
         with:
           keep_latest: 2
@@ -29,52 +36,44 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 安装编译依赖
+      - name: 下载 FriendlyWrt 源代码
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential git subversion flex bison gawk gettext \
-            libncurses5-dev libncursesw5-dev zlib1g-dev unzip wget curl \
-            python3 python3-distutils python3-setuptools rsync ccache
-
-      - name: 下载 FriendlyWrt 源码
-        run: |
-          git clone --depth=1 https://github.com/friendlyarm/friendlywrt.git -b $FRIENDLYWRT_VERSION friendlywrt
+          git clone --depth=1 https://github.com/friendlyarm/friendlywrt.git -b $FRIENDLYWRT_BRANCH friendlywrt
 
       - name: 准备编译配置
         run: |
           cd friendlywrt
-          cp ../configs/config_rk3399_ssr .config
+          cp ../configs/config_rk3399_ssr .config  # 自定义配置
           if [ "${{ matrix.BUILD_TYPE }}" = "docker" ]; then
             echo "CONFIG_PACKAGE_docker=y" >> .config
             echo "CONFIG_PACKAGE_luci-app-dockerman=y" >> .config
           fi
           yes "" | make olddefconfig
 
-      - name: 编译固件
+      - name: 编译固件（固件/镜像）
         run: |
           cd friendlywrt
           make -j$(nproc) || make -j1 V=s
 
-      - name: 整理输出文件并重命名
+      - name: 重命名并整理输出文件
         run: |
           mkdir -p output
           for f in friendlywrt/bin/targets/rockchip/armv8/*; do
-            base=$(basename "$f")
-            cp "$f" "output/${base%.img}-${{ matrix.BUILD_TYPE }}-${{ env.DATE }}.img"
+            filename="$(basename "$f")"
+            cp "$f" "output/${filename%.img}-${{ matrix.BUILD_TYPE }}-${{ env.DATE }}.img"
           done
 
-      - name: 上传构建产物
+      - name: 上传构建产物为 Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: "固件-${{ matrix.BUILD_TYPE }}-${{ env.DATE }}"
+          name: 固件-${{ matrix.BUILD_TYPE }}-${{ env.DATE }}
           path: output/*
 
-      - name: 发布到 Release
+      - name: 发布到 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "rk3399-${{ env.FRIENDLYWRT_VERSION }}"
-          name: "RK3399 FriendlyWrt 固件（${{ matrix.BUILD_TYPE }}-${{ env.DATE }}）"
+          tag_name: "rk3399-${{ env.FRIENDLYWRT_BRANCH }}-${{ env.DATE }}"
+          name: "FriendlyWrt NanoPi M4 镜像（${{ matrix.BUILD_TYPE }}-${{ env.DATE }}）"
           files: output/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
