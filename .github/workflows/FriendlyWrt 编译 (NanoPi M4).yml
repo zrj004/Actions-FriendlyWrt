@@ -1,102 +1,101 @@
-name: FriendlyWrt 构建 NanoPi M4 镜像
+name: FriendlyWrt 编译 NanoPi M4
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 手动触发
   schedule:
-    - cron: '0 3 * * 1' # 每周一 03:00 自动运行
+    - cron: '0 2 * * 1' # 每周一凌晨 2 点自动构建
 
 env:
-  FRIENDLYWRT_VERSION: 24.10
-  TARGET_CPU: rk3399
+  FRIENDLYWRT_VERSION: v24.10
+  CPU: rk3399
 
 jobs:
-  prepare_release:
+  prepare_environment:
     runs-on: ubuntu-22.04
     steps:
-      - name: 获取 release 标签
-        id: release_tag
+      - name: 安装依赖工具
         run: |
-          release_tag="FriendlyWrt-${FRIENDLYWRT_VERSION}-$(date +%Y-%m-%d)"
-          echo "release_tag=$release_tag" >> $GITHUB_ENV
-          echo "##[set-output name=release_tag;]$release_tag"
+          sudo apt update
+          sudo apt install -y unzip wget zlib1g-dev git curl python3 python3-pip
+      - name: 安装 Docker
+        run: |
+          if ! command -v docker &> /dev/null
+          then
+            curl -fsSL https://get.docker.com | sh
+          else
+            echo "Docker 已安装，跳过"
+          fi
+      - name: 配置 GitHub Actions 用户
+        run: |
+          git config --global user.name 'GitHub Actions'
+          git config --global user.email 'noreply@github.com'
 
-      - name: 创建 GitHub Release
-        uses: softprops/action-gh-release@v1
+  download_rootfs:
+    needs: prepare_environment
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 下载 FriendlyWrt rootfs
+        uses: robinraju/release-downloader@v1.6
+        with:
+          repository: friendlyarm/friendlywrt
+          tag: ${{ env.FRIENDLYWRT_VERSION }}
+          fileName: "rk3399-rootfs-${{ env.FRIENDLYWRT_VERSION }}.tgz"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ env.release_tag }}
-          draft: false
-          prerelease: false
 
   build_friendlywrt:
-    needs: prepare_release
+    needs: download_rootfs
     runs-on: ubuntu-22.04
     strategy:
       matrix:
         SET: [docker, non-docker]
-
     steps:
-      - name: Checkout 仓库
-        uses: actions/checkout@v3
-
-      - name: 安装依赖工具
+      - name: 准备编译目录
         run: |
-          sudo apt update
-          sudo apt install -y git wget curl unzip zlib1g-dev python3 python3-distutils
-          # 安装 repo 工具
-          sudo curl -o /usr/local/bin/repo https://storage.googleapis.com/git-repo-downloads/repo
-          sudo chmod a+x /usr/local/bin/repo
-          repo --version
-
-      - name: 初始化 FriendlyWrt 源码
-        run: |
-          mkdir -p project && cd project
-          repo init --depth=1 -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v${FRIENDLYWRT_VERSION} -m ${TARGET_CPU}.xml --repo-url=https://github.com/friendlyarm/repo --no-clone-bundle
-          repo sync -c friendlywrt --no-clone-bundle
-          repo sync -c device/friendlyelec --no-clone-bundle
-          cd ..
-
-      - name: 初始化环境
-        run: |
-          sudo swapoff -a
-          mkdir -p artifact
-          echo "CPU 核心数: $(nproc)"
-
-      - name: 安装 Docker (可选)
-        if: matrix.SET == 'docker'
-        run: |
-          sudo apt remove -y docker docker.io containerd
-          curl -fsSL https://get.docker.com | sh
-          docker --version
-
-      - name: 编译 FriendlyWrt
+          mkdir -p project
+          cd project
+          tar xvzf ../rk3399-rootfs-${FRIENDLYWRT_VERSION}.tgz
+          cd friendlywrt
+          mkdir -p package/custom
+          echo "src-git custom https://github.com/ophub/luci-app-ssr-plus.git" > feeds.conf.custom
+      - name: 更新并安装 feed
         run: |
           cd project/friendlywrt
-          [ "${{ matrix.SET }}" == "docker" ] && SUFFIX="-docker" || SUFFIX=""
-          DIRNAME=friendlywrt$(echo $FRIENDLYWRT_VERSION | awk -F . '{print $1}')${SUFFIX}
-          CONFIG=rockchip${SUFFIX}
-          cat > .current_config.mk <<EOL
-          . device/friendlyelec/${TARGET_CPU}/base.mk
-          TARGET_IMAGE_DIRNAME=${DIRNAME}
-          TARGET_FRIENDLYWRT_CONFIG=${CONFIG}
-          EOL
-          ./build.sh friendlywrt
-          make -j$(nproc)
-
-      - name: 打包 rootfs
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+      - name: 配置默认编译
         run: |
-          cd project
-          [ "${{ matrix.SET }}" == "docker" ] && SUFFIX="-docker" || SUFFIX=""
-          rootfs_filename="rootfs-friendlywrt-${FRIENDLYWRT_VERSION}${SUFFIX}.tgz"
-          tar cvzf ../artifact/${rootfs_filename} friendlywrt/build_dir/target-*/root-*
-          echo "rootfs 文件: $rootfs_filename"
+          cd project/friendlywrt
+          make defconfig
+      - name: 编译 FriendlyWrt + SSR Plus+
+        run: |
+          cd project/friendlywrt
+          if [ "${{ matrix.SET }}" == "docker" ]; then
+            make -j$(nproc) V=s
+          else
+            make -j1 V=s
+          fi
 
-      - name: 上传 rootfs 到 Release
+  package_release:
+    needs: build_friendlywrt
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 创建 Release
+        id: release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: "FriendlyWrt-${{ env.FRIENDLYWRT_VERSION }}-NanoPiM4"
+          name: "FriendlyWrt ${FRIENDLYWRT_VERSION} NanoPi M4 镜像"
+          body: "包含最新 SSR Plus+ LuCI 插件，可直接刷入 NanoPi M4"
+          draft: false
+          prerelease: false
+      - name: 上传镜像到 Release
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ./artifact/rootfs-friendlywrt-${FRIENDLYWRT_VERSION}${{ matrix.SET == 'docker' && '-docker' || '' }}.tgz
-          asset_name: rootfs-friendlywrt-${FRIENDLYWRT_VERSION}${{ matrix.SET == 'docker' && '-docker' || '' }}.tgz
-          tag: ${{ needs.prepare_release.outputs.release_tag }}
+          file: project/friendlywrt/bin/targets/rockchip/armv8/*/friendlywrt-*.img
+          asset_name: "friendlywrt-${{ env.FRIENDLYWRT_VERSION }}-nanopi-m4-${{ matrix.SET }}.img"
+          tag: ${{ steps.release.outputs.tag_name }}
           overwrite: true
