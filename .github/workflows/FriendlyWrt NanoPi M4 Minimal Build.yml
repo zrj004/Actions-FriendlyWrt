@@ -56,18 +56,20 @@ jobs:
 
       - name: Download source (minimal)
         run: |
-          # 确保 PATH 生效
           export PATH=$HOME/bin:$PATH
           mkdir -p project && cd project
           repo init -u https://github.com/friendlyarm/friendlywrt_manifests \
                     -b master-v${{ env.FW_VERSION }} \
                     -m ${CPU}.xml --repo-url=https://github.com/friendlyarm/repo
+          # 同步 friendlywrt + scripts 仓库，保证 feeds 脚本可用
           repo sync -c friendlywrt --no-clone-bundle
+          repo sync -c scripts --no-clone-bundle
 
       - name: Apply minimal customization (SSR Plus+)
         run: |
           export PATH=$HOME/bin:$PATH
-          cd project
+          cd project/friendlywrt
+          # 只安装 luci-app-ssr-plus
           echo 'src-git packages https://github.com/coolsnowwolf/packages' > feeds.conf
           ./scripts/feeds update -a
           ./scripts/feeds install -a luci-app-ssr-plus
