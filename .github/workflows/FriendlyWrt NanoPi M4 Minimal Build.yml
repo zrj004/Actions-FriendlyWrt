@@ -39,7 +39,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Init Environment
+      - name: Init Environment and Install Repo
         run: |
           sudo rm -rf /etc/apt/sources.list.d
           wget https://raw.githubusercontent.com/friendlyarm/build-env-on-ubuntu-bionic/master/install.sh
@@ -47,6 +47,12 @@ jobs:
           sudo swapoff -a
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk /usr/local/share/boost /opt/ghc
           echo "cores: $(nproc)"
+          
+          # 安装 repo 工具
+          mkdir -p ~/bin
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo "export PATH=\$HOME/bin:\$PATH" >> $GITHUB_ENV
 
       - name: Download source (minimal)
         run: |
@@ -59,7 +65,6 @@ jobs:
       - name: Apply minimal customization (SSR Plus+)
         run: |
           cd project
-          # 只安装 luci-app-ssr-plus
           echo 'src-git packages https://github.com/coolsnowwolf/packages' > feeds.conf
           ./scripts/feeds update -a
           ./scripts/feeds install -a luci-app-ssr-plus
