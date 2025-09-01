@@ -1,83 +1,89 @@
-name: Build NanoPi M4 FriendlyWrt with SSR Plus+ (Docker/Non-Docker)
+name: Build NanoPi M4 SSR Plus+ SD Image
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 3 * * 0'  # 每周日 UTC 3:00
+    - cron: '0 0 * * 0' # 每周一次，周日 00:00 UTC
 
 jobs:
-  build_rootfs_ssr:
+  build:
     runs-on: ubuntu-22.04
-    strategy:
-      matrix:
-        SET: [docker, non-docker]
+    env:
+      ROOTFS_URL: "https://github.com/<your-repo>/friendlywrt-rootfs/releases/download/<tag>/rootfs-nanopi-m4.tgz"
+      IMAGE_NAME: "FriendlyWrt-NanoPi-M4-SSRPlus"
+      IMG_SIZE_MB: 4096   # SD卡大小
+      BOOT_SIZE_MB: 128   # boot分区大小
     steps:
-    - name: Checkout repo
-      uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v3
 
-    - name: Setup environment
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y git wget build-essential libncurses5-dev zlib1g-dev gcc g++ unzip python3
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git gzip tar xz-utils parted dosfstools rsync qemu-user-static kpartx
 
-    - name: Download FriendlyWrt rootfs
-      run: |
-        mkdir -p project
-        cd project
-        wget -q https://github.com/friendlyarm/friendlywrt/releases/download/v24.10/rootfs-friendlywrt-24.10.tgz
-        tar -xzf rootfs-friendlywrt-24.10.tgz -C friendlywrt
+      - name: Prepare rootfs
+        run: |
+          mkdir -p workspace/rootfs
+          cd workspace/rootfs
+          wget -O friendlywrt-rootfs.tgz $ROOTFS_URL
+          tar xzf friendlywrt-rootfs.tgz
 
-    - name: Add SSR Plus+ feed
-      run: |
-        cd project/friendlywrt
-        mkdir -p package/custom
-        echo "src-git custom https://github.com/ophub/luci-app-ssr-plus.git" > feeds.conf.custom
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
+      - name: Add SSR Plus+ package
+        run: |
+          cd workspace/rootfs
+          mkdir -p package/custom
+          git clone --depth=1 https://github.com/ophub/luci-app-ssr-plus.git package/custom/luci-app-ssr-plus
 
-    - name: Prepare config
-      run: |
-        cd project/friendlywrt
-        [ "${{ matrix.SET }}" == "docker" ] && SUFFIX="-docker" || SUFFIX=""
-        DIRNAME=friendlywrt24${SUFFIX}
-        CONFIG=rockchip${SUFFIX}
-        cat > .current_config.mk <<EOL
-. device/friendlyelec/rk3399/base.mk
-TARGET_IMAGE_DIRNAME=${DIRNAME}
-TARGET_FRIENDLYWRT_CONFIG=${CONFIG}
-EOL
-        make defconfig
+      - name: Create SD image with boot + rootfs partitions
+        run: |
+          mkdir -p workspace/image
+          IMG_FILE="workspace/image/${IMAGE_NAME}.img"
+          dd if=/dev/zero of=$IMG_FILE bs=1M count=$IMG_SIZE_MB
 
-    - name: Compile
-      run: |
-        cd project/friendlywrt
-        make -j$(nproc) V=s || make -j1 V=s
+          # 分区
+          parted -s $IMG_FILE mklabel msdos
+          parted -s $IMG_FILE mkpart primary fat32 1MiB ${BOOT_SIZE_MB}MiB
+          parted -s $IMG_FILE mkpart primary ext4 ${BOOT_SIZE_MB}MiB 100%
 
-    - name: Build SD image
-      run: |
-        cd project/friendlywrt
-        if [ -f scripts/make_sdcard.sh ]; then
-          ./scripts/make_sdcard.sh
-          mv out/*.img ../
-        else
-          echo "请手动烧录 rootfs 到 SD 卡"
-        fi
+          # 创建 loop 设备
+          LOOPDEV=$(sudo losetup --show -fP $IMG_FILE)
+          sudo mkfs.vfat ${LOOPDEV}p1
+          sudo mkfs.ext4 ${LOOPDEV}p2
 
-    - name: Create GitHub release
-      id: create_release
-      uses: softprops/action-gh-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: "FriendlyWrt-SSRPlus-$(date +%Y-%m-%d)"
-        draft: false
-        prerelease: false
+          # 挂载 rootfs
+          sudo mkdir -p /mnt/boot /mnt/rootfs
+          sudo mount ${LOOPDEV}p2 /mnt/rootfs
+          sudo rsync -a workspace/rootfs/ /mnt/rootfs/
+          sudo umount /mnt/rootfs
 
-    - name: Upload SD image to release
-      uses: svenstaro/upload-release-action@v2
-      with:
-        repo_token: ${{ secrets.GITHUB_TOKEN }}
-        file: project/*.img
-        asset_name: "NanoPiM4-FriendlyWrt-SSRPlus-${{ matrix.SET }}.img"
-        tag: ${{ steps.create_release.outputs.tag_name }}
-        overwrite: true
+          # 可选：挂载 boot 分区复制 boot 文件（如果 rootfs 中有 boot）
+          if [ -d workspace/rootfs/boot ]; then
+            sudo mount ${LOOPDEV}p1 /mnt/boot
+            sudo rsync -a workspace/rootfs/boot/ /mnt/boot/
+            sudo umount /mnt/boot
+          fi
+
+          sudo losetup -d $LOOPDEV
+
+          # 压缩镜像
+          gzip -c $IMG_FILE > ${IMG_FILE}.gz
+
+      - name: Create GitHub release
+        id: release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: "${{ env.IMAGE_NAME }}-$(date +%Y-%m-%d)"
+          name: "${{ env.IMAGE_NAME }} $(date +%Y-%m-%d)"
+          draft: false
+          prerelease: false
+
+      - name: Upload SD image
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: workspace/image/${IMAGE_NAME}.img.gz
+          asset_name: ${IMAGE_NAME}.img.gz
+          tag: ${{ steps.release.outputs.tag_name }}
