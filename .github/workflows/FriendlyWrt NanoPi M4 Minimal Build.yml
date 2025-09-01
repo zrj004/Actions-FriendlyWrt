@@ -125,3 +125,63 @@ EOL
           asset_name: ${{ steps.create_rootfs_package.outputs.rootfs_filename }}
           tag: ${{ needs.prepare_release.outputs.release_tag }}
           overwrite: true
+
+  build_img:
+    needs: build_friendlywrt
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        VERSION: ['24.10']
+        CPU: [rk3399]
+        SET: [docker, non-docker]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Setup environment
+        run: |
+          sudo apt update
+          sudo apt install -y git wget python3 curl unzip build-essential bc ccache
+          mkdir -p ~/bin
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          export PATH=~/bin:$PATH
+          wget https://raw.githubusercontent.com/friendlyarm/build-env-on-ubuntu-bionic/master/install.sh
+          sudo bash ./install.sh
+          sudo git config --global user.name 'GitHub Actions'
+          sudo git config --global user.email 'noreply@github.com'
+          mkdir -p artifact
+          sudo swapoff -a
+
+      - name: Download rootfs
+        run: |
+          SUFFIX=""
+          if [ "${{ matrix.SET }}" = "docker" ]; then
+            SUFFIX="-docker"
+          fi
+          curl -L -o rootfs.tgz https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare_release.outputs.release_tag }}/rootfs-friendlywrt-${{ matrix.VERSION }}$SUFFIX.tgz
+
+      - name: Compile uboot & kernel
+        run: |
+          cd project
+          ./build.sh uboot
+          ./build.sh kernel
+
+      - name: Build SD image
+        id: build_sd_image
+        run: |
+          cd project
+          ./build.sh sd-img
+          mv out/* ../artifact/
+          cd ../artifact/
+          gzip *.img
+          echo "img_filename=$(ls *.img.gz)" >> $GITHUB_OUTPUT
+
+      - name: Upload image
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ./artifact/${{ steps.build_sd_image.outputs.img_filename }}
+          asset_name: ${{ steps.build_sd_image.outputs.img_filename }}
+          tag: ${{ needs.prepare_release.outputs.release_tag }}
+          overwrite: true
