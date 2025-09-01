@@ -1,93 +1,107 @@
-name: NanoPi M4 FriendlyWrt + SSR Plus+ (Docker & 非Docker)
+name: FriendlyWrt-NanoPiM4-编译
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: '0 0 * * 0' # 每周日自动构建
+    - cron: '0 3 * * 1'  # 每周一凌晨3点自动触发
+  workflow_dispatch:     # 手动触发
+  watch:
+    types: started
 
 jobs:
-  build:
+  prepare_release:
     runs-on: ubuntu-22.04
-    strategy:
-      matrix:
-        SET: [docker, non-docker]
-    env:
-      FRIENDLYWRT_MANIFEST: "https://github.com/friendlyarm/friendlywrt_manifests"
-      BRANCH: "master-v24.10"
     steps:
-      - name: 检出源码
-        uses: actions/checkout@v3
-
-      - name: 安装依赖
+      - name: 获取发布标签
+        id: release_tag
         run: |
-          sudo apt-get update
-          sudo apt-get install -y git python3 wget unzip xz-utils build-essential libncurses5-dev zlib1g-dev gcc g++ make gcc-multilib gawk flex bison gettext libssl-dev python3-distutils rsync qemu-user-static parted dosfstools kpartx docker.io
+          release_tag="FriendlyWrt-NanoPiM4-$(date +%Y-%m-%d)"
+          echo "##[set-output name=release_tag;]$release_tag"
 
-      - name: 克隆 FriendlyWrt manifests
-        run: |
-          mkdir -p project
-          cd project
-          git clone --depth=1 -b $BRANCH $FRIENDLYWRT_MANIFEST friendlywrt_manifests
-
-      - name: 初始化 FriendlyWrt 源码
-        run: |
-          cd project
-          repo init -u $FRIENDLYWRT_MANIFEST -b $BRANCH -m rk3399.xml --repo-url=https://github.com/friendlyarm/repo --no-clone-bundle
-          repo sync -c friendlywrt --no-clone-bundle
-          repo sync -c device/friendlyelec --no-clone-bundle
-          repo sync -c scripts --no-clone-bundle
-          repo sync -c toolchain --no-clone-bundle
-
-      - name: 添加 SSR Plus+ 包
-        run: |
-          cd project/friendlywrt
-          mkdir -p package/custom
-          git clone --depth=1 https://github.com/ophub/luci-app-ssr-plus.git package/custom/luci-app-ssr-plus
-          echo "" > feeds.conf.default
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-
-      - name: 配置编译
-        run: |
-          cd project/friendlywrt
-          if [ "${{ matrix.SET }}" == "docker" ]; then
-            echo "CONFIG_DOCKER=y" >> .config
-          fi
-          make defconfig
-
-      - name: 编译 FriendlyWrt + SSR Plus+
-        run: |
-          cd project/friendlywrt
-          make -j$(nproc) || make -j1 V=s
-
-      - name: 构建 SD 镜像或 Docker rootfs
-        run: |
-          cd project/friendlywrt
-          mkdir -p ../../artifact
-          if [ "${{ matrix.SET }}" == "docker" ]; then
-            make image/ramdisk/rootfs.tar.gz
-            cp -v tmp/rootfs.tar.gz ../../artifact/友善路由-NanoPiM4-Docker-rootfs.tar.gz
-          else
-            ./build.sh sd-img
-            mv out/NanoPiM4-*.img ../../artifact/
-            gzip ../../artifact/NanoPiM4-*.img
-          fi
-
-      - name: 创建 GitHub Release
+      - name: 创建空发布
         id: release
         uses: softprops/action-gh-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: "友善路由-NanoPiM4-${{ matrix.SET }}-$(date +%Y-%m-%d)"
-          name: "友善路由 NanoPiM4 ${ { matrix.SET } } 镜像 $(date +%Y-%m-%d)"
+          tag_name: ${{ steps.release_tag.outputs.release_tag }}
           draft: false
           prerelease: false
 
-      - name: 上传构建产物
+    outputs:
+      release_tag: ${{ steps.release_tag.outputs.release_tag }}
+      upload_url: ${{ steps.release.outputs.upload_url }}
+
+  build_friendlywrt:
+    needs: prepare_release
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        SET: [docker, non-docker]
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v3
+
+      - name: 初始化环境
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d
+          sudo apt-get update
+          sudo apt-get install -y unzip wget zlib1g-dev git build-essential curl qemu-user-static
+
+      - name: 安装 Docker（仅 docker 选项）
+        if: matrix.SET == 'docker'
+        run: |
+          curl -fsSL https://get.docker.com | sh
+          sudo systemctl enable docker
+          sudo systemctl start docker
+
+      - name: 下载 FriendlyWrt rootfs
+        run: |
+          mkdir project
+          cd project
+          wget -O friendlywrt-rootfs.tgz https://github.com/friendlyarm/friendlywrt/releases/download/rootfs/rootfs-nanopi-m4.tgz
+          tar xzf friendlywrt-rootfs.tgz
+
+      - name: 拉取 SSR Plus+ feed
+        run: |
+          cd project/friendlywrt
+          mkdir -p package/custom
+          echo "src-git custom https://github.com/ophub/luci-app-ssr-plus.git" > feeds.conf.custom
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 准备配置文件
+        run: |
+          cd project/friendlywrt
+          [ "${{ matrix.SET }}" == "docker" ] && SUFFIX="-docker" || SUFFIX=""
+          DIRNAME=friendlywrt-nanopi-m4${SUFFIX}
+          CONFIG=nanopi-m4${SUFFIX}
+          cat > .current_config.mk <<EOL
+          . device/friendlyelec/rk3399/base.mk
+          TARGET_IMAGE_DIRNAME=${DIRNAME}
+          TARGET_FRIENDLYWRT_CONFIG=${CONFIG}
+          TARGET_SD_RAW_FILENAME=${DIRNAME}.img
+          EOL
+          make defconfig
+
+      - name: 编译 FriendlyWrt
+        run: |
+          cd project/friendlywrt
+          make -j$(nproc) || make -j1 V=s
+
+      - name: 生成 SD 卡镜像
+        run: |
+          cd project/friendlywrt
+          ./scripts/mkimage.sh -t sd
+          mv images/*.img ../../artifact/
+          cd ../../artifact/
+          gzip *.img
+
+      - name: 上传 SD 卡镜像到 release
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: artifact/*
-          asset_name: "${{ matrix.SET }}-镜像"
-          tag: ${{ steps.release.outputs.tag_name }}
+          file: ./artifact/*.img.gz
+          asset_name: FriendlyWrt-NanoPiM4-镜像.img.gz
+          tag: ${{ needs.prepare_release.outputs.release_tag }}
+          overwrite: true
