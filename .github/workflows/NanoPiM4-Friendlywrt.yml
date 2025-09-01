@@ -1,108 +1,83 @@
-name: Build FriendlyWrt NanoPi M4
+name: Build NanoPi M4 FriendlyWrt with SSR Plus+ (Docker/Non-Docker)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 3 * * 0'  # 每周一次，UTC时间周日 3点
+    - cron: '0 3 * * 0'  # 每周日 UTC 3:00
 
 jobs:
-  prepare_release:
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Set release tag
-        id: release_tag
-        run: |
-          release_tag="FriendlyWrt-NanoPiM4-$(date +%Y-%m-%d)"
-          echo "release_tag=$release_tag" >> $GITHUB_OUTPUT
-
-      - name: Create GitHub Release
-        id: release
-        uses: softprops/action-gh-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ steps.release_tag.outputs.release_tag }}
-          draft: false
-          prerelease: false
-    outputs:
-      release_tag: ${{ steps.release_tag.outputs.release_tag }}
-      upload_url: ${{ steps.release.outputs.upload_url }}
-
-  build_friendlywrt:
-    needs: prepare_release
+  build_rootfs_ssr:
     runs-on: ubuntu-22.04
     strategy:
       matrix:
         SET: [docker, non-docker]
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v3
+    - name: Checkout repo
+      uses: actions/checkout@v3
 
-      - name: Install build environment
-        run: |
-          sudo rm -rf /etc/apt/sources.list.d
-          wget https://raw.githubusercontent.com/friendlyarm/build-env-on-ubuntu-bionic/master/install.sh
-          sed -i -e 's/^apt-get -y install openjdk-8-jdk/# apt-get -y install openjdk-8-jdk/g' install.sh
-          sudo bash ./install.sh
-          git clone https://github.com/friendlyarm/repo
-          sudo cp repo/repo /usr/bin/
-          sudo swapoff -a
+    - name: Setup environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y git wget build-essential libncurses5-dev zlib1g-dev gcc g++ unzip python3
 
-      - name: Download FriendlyWrt source
-        run: |
-          mkdir project && cd project
-          repo init -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v24.10 \
-                   -m rk3566.xml --repo-url=https://github.com/friendlyarm/repo --no-clone-bundle
-          repo sync -c kernel configs device/common device/friendlyelec scripts scripts/sd-fuse toolchain --no-clone-bundle
+    - name: Download FriendlyWrt rootfs
+      run: |
+        mkdir -p project
+        cd project
+        wget -q https://github.com/friendlyarm/friendlywrt/releases/download/v24.10/rootfs-friendlywrt-24.10.tgz
+        tar -xzf rootfs-friendlywrt-24.10.tgz -C friendlywrt
 
-      - name: Keep only SSR Plus+ package
-        run: |
-          cd project/friendlywrt
-          mkdir -p package/custom
-          echo "src-git custom https://github.com/ophub/luci-app-ssr-plus.git" > feeds.conf.custom
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+    - name: Add SSR Plus+ feed
+      run: |
+        cd project/friendlywrt
+        mkdir -p package/custom
+        echo "src-git custom https://github.com/ophub/luci-app-ssr-plus.git" > feeds.conf.custom
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
 
-      - name: Prepare config
-        run: |
-          cd project/friendlywrt
-          [ "${{ matrix.SET }}" == "docker" ] && SUFFIX="-docker"
-          DIRNAME=friendlywrt24${SUFFIX}
-          CONFIG=nanopi-m4${SUFFIX}
-          cat > .current_config.mk <<EOL
-          . device/friendlyelec/rk3566/base.mk
-          TARGET_IMAGE_DIRNAME=${DIRNAME}
-          TARGET_FRIENDLYWRT_CONFIG=${CONFIG}
-          EOL
-          make defconfig
+    - name: Prepare config
+      run: |
+        cd project/friendlywrt
+        [ "${{ matrix.SET }}" == "docker" ] && SUFFIX="-docker" || SUFFIX=""
+        DIRNAME=friendlywrt24${SUFFIX}
+        CONFIG=rockchip${SUFFIX}
+        cat > .current_config.mk <<EOL
+. device/friendlyelec/rk3399/base.mk
+TARGET_IMAGE_DIRNAME=${DIRNAME}
+TARGET_FRIENDLYWRT_CONFIG=${CONFIG}
+EOL
+        make defconfig
 
-      - name: Compile FriendlyWrt
-        run: |
-          cd project/friendlywrt
-          make -j$(nproc) || make -j1 V=s
+    - name: Compile
+      run: |
+        cd project/friendlywrt
+        make -j$(nproc) V=s || make -j1 V=s
 
-      - name: Package rootfs
-        run: |
-          cd project
-          [ "${{ matrix.SET }}" == "docker" ] && SUFFIX="-docker"
-          ROOTFS=rootfs-nanopi-m4${SUFFIX}.tgz
-          tar cvzf ../artifact/${ROOTFS} friendlywrt/build_dir/target-*/*/root-*
-          echo "rootfs_file=${ROOTFS}" >> $GITHUB_OUTPUT
+    - name: Build SD image
+      run: |
+        cd project/friendlywrt
+        if [ -f scripts/make_sdcard.sh ]; then
+          ./scripts/make_sdcard.sh
+          mv out/*.img ../
+        else
+          echo "请手动烧录 rootfs 到 SD 卡"
+        fi
 
-      - name: Build SD card image
-        run: |
-          cd project/friendlywrt
-          ./build.sh sd-img
-          IMG_FILE=out/friendlywrt24${SUFFIX}.img
-          gzip $IMG_FILE
-          echo "sd_img_file=${IMG_FILE}.gz" >> $GITHUB_OUTPUT
+    - name: Create GitHub release
+      id: create_release
+      uses: softprops/action-gh-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: "FriendlyWrt-SSRPlus-$(date +%Y-%m-%d)"
+        draft: false
+        prerelease: false
 
-      - name: Upload artifacts
-        uses: svenstaro/upload-release-action@v2
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: |
-            ./artifact/${{ steps.rootfs_file.outputs.rootfs_file }}
-            ./artifact/${{ steps.sd_img_file.outputs.sd_img_file }}
-          tag: ${{ needs.prepare_release.outputs.release_tag }}
-          overwrite: true
+    - name: Upload SD image to release
+      uses: svenstaro/upload-release-action@v2
+      with:
+        repo_token: ${{ secrets.GITHUB_TOKEN }}
+        file: project/*.img
+        asset_name: "NanoPiM4-FriendlyWrt-SSRPlus-${{ matrix.SET }}.img"
+        tag: ${{ steps.create_release.outputs.tag_name }}
+        overwrite: true
