@@ -1,138 +1,101 @@
-name: FriendlyWrt 编译 (NanoPi M4)
+name: FriendlyWrt NanoPi M4 编译
 
 on:
   schedule:
-    - cron: '0 3 * * 0' # 每周日凌晨3点
+    - cron: '0 3 * * 0'   # 每周日凌晨3点
   workflow_dispatch:
 
 jobs:
-  准备发布:
-    runs-on: ubuntu-22.04
-    steps:
-    - name: 获取发布标签
-      id: release_tag
-      run: |
-        发布标签="FriendlyWrt-$(date +%Y-%m-%d)"
-        echo "##[set-output name=release_tag;]$发布标签"
-
-    - name: 创建空发布
-      id: release
-      uses: softprops/action-gh-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ steps.release_tag.outputs.release_tag }}
-        draft: false
-        prerelease: false
-    outputs:
-      release_tag: ${{ steps.release_tag.outputs.release_tag }}
-      upload_url: ${{ steps.release.outputs.upload_url }}
-
-  编译_friendlywrt:
-    needs: 准备发布
+  build:
     runs-on: ubuntu-22.04
     strategy:
       matrix:
-        VERSION: ['24.10']
         SET: [docker, non-docker]
+    env:
+      FRIENDLYWRT_VERSION: "24.10"
     steps:
-    - name: Checkout
-      uses: actions/checkout@main
+    - name: Checkout 仓库
+      uses: actions/checkout@v3
 
-    - name: 初始化环境
-      env:
-        DEBIAN_FRONTEND: noninteractive
+    - name: 安装依赖
       run: |
         sudo apt-get update
         sudo apt-get install -y build-essential git wget curl unzip bc ccache libncurses5-dev zlib1g-dev gawk gettext libssl-dev xsltproc python3-distutils
-        echo "CPU 核心数: $(nproc)"
 
     - name: 安装 Docker（如果需要）
       if: matrix.SET == 'docker'
       run: |
-        if ! command -v docker &> /dev/null
-        then
-          echo "Docker 不存在，开始安装..."
+        if ! command -v docker &> /dev/null; then
           curl -fsSL https://get.docker.com | sh
           sudo systemctl enable docker
           sudo systemctl start docker
-        else
-          echo "Docker 已存在，跳过安装"
         fi
 
-    - name: 下载 FriendlyWrt 源
+    - name: 下载 FriendlyWrt 源（只 sync friendlywrt & device/friendlyelec）
       run: |
-        mkdir project
+        mkdir -p project
         cd project
-        repo init --depth=1 -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v${{ matrix.VERSION }} \
-          -m rk3399.xml --repo-url=https://github.com/friendlyarm/repo --no-clone-bundle
+        repo init --depth=1 -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v${FRIENDLYWRT_VERSION} -m rk3399.xml --repo-url=https://github.com/friendlyarm/repo --no-clone-bundle
         repo sync -c friendlywrt --no-clone-bundle
-        repo sync -c configs --no-clone-bundle
-        repo sync -c device/common --no-clone-bundle
         repo sync -c device/friendlyelec --no-clone-bundle
-        repo sync -c scripts --no-clone-bundle
-        repo sync -c scripts/sd-fuse --no-clone-bundle
-        repo sync -c toolchain --no-clone-bundle
+        cd ..
 
     - name: 拉取 SSR Plus+ feed
       run: |
         cd project/friendlywrt
         mkdir -p package/custom
         echo "src-git custom https://github.com/ophub/luci-app-ssr-plus.git" > feeds.conf.custom
+        chmod +x scripts/feeds
         ./scripts/feeds update -a
         ./scripts/feeds install -a
+        cd ../..
 
     - name: 准备编译配置
       run: |
         cd project/friendlywrt
-        [ "${{ matrix.SET }}" == "docker" ] && SUFFIX="-docker"
-        DIRNAME=friendlywrt$(echo ${{ matrix.VERSION }}|awk -F . '{print $1}')${SUFFIX}
-        CONFIG=rockchip${SUFFIX}
-        cat > .current_config.mk <<EOL
-        . device/friendlyelec/rk3399/base.mk
-        TARGET_IMAGE_DIRNAME=${DIRNAME}
-        TARGET_FRIENDLYWRT_CONFIG=${CONFIG}
-        TARGET_SD_RAW_FILENAME=NanoPi-M4-${{ matrix.VERSION }}${SUFFIX}.img
-        EOL
+        [ "${{ matrix.SET }}" == "docker" ] && SUFFIX="-docker" || SUFFIX=""
+        echo ". device/friendlyelec/rk3399/base.mk" > .current_config.mk
+        echo "TARGET_FRIENDLYWRT_CONFIG=rockchip${SUFFIX}" >> .current_config.mk
+        echo "TARGET_IMAGE_DIRNAME=friendlywrt${FRIENDLYWRT_VERSION}${SUFFIX}" >> .current_config.mk
+        echo "TARGET_SD_RAW_FILENAME=NanoPi-M4-${FRIENDLYWRT_VERSION}${SUFFIX}.img" >> .current_config.mk
         make defconfig
+        cd ../..
 
     - name: 编译 FriendlyWrt
       run: |
         cd project/friendlywrt
         make -j$(nproc) || make -j1 V=s
+        cd ../..
 
     - name: 打包 rootfs
       run: |
+        mkdir -p artifact
         cd project
-        source .current_config.mk
-        [ "${{ matrix.SET }}" == "docker" ] && SUFFIX="-docker"
-        ROOTFS_FILE="rootfs-friendlywrt-${{ matrix.VERSION }}${SUFFIX}.tgz"
-        tar cvzf ../artifact/${ROOTFS_FILE} ${FRIENDLYWRT_SRC}/${FRIENDLYWRT_ROOTFS} \
-              ${FRIENDLYWRT_SRC}/${FRIENDLYWRT_PACKAGE_DIR}
-        echo "##[set-output name=rootfs_file;]$ROOTFS_FILE"
+        tar czf ../artifact/rootfs-friendlywrt-${FRIENDLYWRT_VERSION}.tgz friendlywrt/build_dir/target-*/root-*
+        cd ..
 
-    - name: 编译 SD 镜像
+    - name: 打包 SD 镜像
       run: |
         cd project/friendlywrt
         ./build.sh sd-img
-        mv out/NanoPi-M4-${{ matrix.VERSION }}*.img ../artifact/
-        cd ../artifact/
+        mv out/NanoPi-M4-${FRIENDLYWRT_VERSION}*.img ../artifact/
+        cd artifact
         gzip *.img
+        cd ..
 
-    - name: 上传 rootfs
+    - name: 创建 Release 并上传
+      uses: softprops/action-gh-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: "FriendlyWrt-${FRIENDLYWRT_VERSION}-$(date +'%Y-%m-%d')"
+        draft: false
+        prerelease: false
+
+    - name: 上传 artifact
       uses: svenstaro/upload-release-action@v2
       with:
         repo_token: ${{ secrets.GITHUB_TOKEN }}
-        file: ./artifact/${{ steps.打包_rootfs.outputs.rootfs_file }}
-        asset_name: ${{ steps.打包_rootfs.outputs.rootfs_file }}
-        tag: ${{ needs.准备发布.outputs.release_tag }}
-        overwrite: true
-
-    - name: 上传 SD 镜像
-      uses: svenstaro/upload-release-action@v2
-      with:
-        repo_token: ${{ secrets.GITHUB_TOKEN }}
-        file: ./artifact/NanoPi-M4-${{ matrix.VERSION }}*.img.gz
-        asset_name: NanoPi-M4-${{ matrix.VERSION }}.img.gz
-        tag: ${{ needs.准备发布.outputs.release_tag }}
+        file: ./artifact/*
+        tag: "FriendlyWrt-${FRIENDLYWRT_VERSION}-$(date +'%Y-%m-%d')"
         overwrite: true
