@@ -43,7 +43,6 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y git wget python3 curl unzip build-essential bc ccache
-
           mkdir -p ~/bin
           curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
           chmod a+x ~/bin/repo
@@ -72,14 +71,18 @@ jobs:
           source ../scripts/add_packages.sh
           source ../scripts/custome_config.sh
 
-      - name: Prepare minimal config
+      - name: Set SUFFIX
+        id: set_suffix
         run: |
-          cd project
           SUFFIX=""
           if [ "${{ matrix.SET }}" == "docker" ]; then
             SUFFIX="-docker"
           fi
+          echo "suffix=$SUFFIX" >> $GITHUB_OUTPUT
 
+      - name: Prepare minimal config
+        run: |
+          cd project
           cat > .config <<EOL
 CONFIG_PACKAGE_base-files=y
 CONFIG_PACKAGE_busybox=y
@@ -88,13 +91,11 @@ CONFIG_PACKAGE_luci-ssl=y
 CONFIG_PACKAGE_luci-app-ssr-plus=y
 EOL
           make defconfig
-          echo "SUFFIX=$SUFFIX" >> $GITHUB_OUTPUT
 
       - name: Download package
         run: |
           cd project/friendlywrt
           make download -j8
-          find dl -size -1024c -exec ls -l {} \;
           find dl -size -1024c -exec rm -f {} \;
 
       - name: Compile friendlyWrt
@@ -103,9 +104,8 @@ EOL
         run: |
           cd project/friendlywrt
           make -j$(nproc) || make -j1 V=s
-          echo $?
 
-      - name: Check the result and try again
+      - name: Retry on failure
         if: steps.compile.outcome == 'failure'
         run: |
           cd project/friendlywrt
@@ -115,7 +115,7 @@ EOL
         id: create_rootfs_package
         run: |
           cd project
-          ROOTFS_SUFFIX=${{ steps.prepare_minimal_config.outputs.SUFFIX || "" }}
+          ROOTFS_SUFFIX=${{ steps.set_suffix.outputs.suffix }}
           rootfs_filename="rootfs-friendlywrt-${{ matrix.VERSION }}$ROOTFS_SUFFIX.tgz"
           tar cvzf ../artifact/${rootfs_filename} ${FRIENDLYWRT_SRC}/${FRIENDLYWRT_ROOTFS} \
                 ${FRIENDLYWRT_SRC}/${FRIENDLYWRT_PACKAGE_DIR}
