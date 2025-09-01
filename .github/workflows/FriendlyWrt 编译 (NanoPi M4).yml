@@ -1,79 +1,88 @@
-name: 构建 FriendlyWrt NanoPi M4
+name: 每周构建 FriendlyWrt NanoPi M4 镜像
 
 on:
-  workflow_dispatch:   # 手动触发
   schedule:
-    - cron: "0 20 * * 6"   # 每周日北京时间凌晨4点（UTC周六20点）
+    - cron: '0 3 * * 0'   # 每周日 03:00 UTC
+  workflow_dispatch:
 
 env:
+  FRIENDLYWRT_VERSION: 24.10
   CPU: rk3399
-  FRIENDLYWRT_BRANCH: master-v24.10   # 使用可用的分支
-  DATE: ${{ github.run_number }}
 
 jobs:
-  build:
+  build_friendlywrt:
     runs-on: ubuntu-22.04
     strategy:
       matrix:
-        BUILD_TYPE: [normal, docker]
+        BUILD_TYPE: [docker, non-docker]
 
     steps:
-      - name: 检出仓库
-        uses: actions/checkout@v4
+      - name: Checkout 仓库
+        uses: actions/checkout@v3
 
-      - name: 安装依赖工具
+      - name: 安装基础依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential git wget curl unzip xz-utils \
-            libncurses5-dev zlib1g-dev python3-distutils rsync ccache
+            libncurses5-dev zlib1g-dev python3-distutils rsync ccache dialog
 
-      - name: 清理旧 Release 和 Artifact
-        uses: dev-drprasad/delete-older-releases@v0.3.2
-        with:
-          keep_latest: 2
-          delete_tags: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: 下载 FriendlyWrt 源代码
+      - name: 安装 Docker (仅 Docker 类型)
+        if: matrix.BUILD_TYPE == 'docker'
         run: |
-          git clone --depth=1 https://github.com/friendlyarm/friendlywrt.git -b $FRIENDLYWRT_BRANCH friendlywrt
+          curl -fsSL https://get.docker.com | sh
+          sudo systemctl start docker
+          sudo docker version
 
-      - name: 准备编译配置
+      - name: 下载 FriendlyWrt rootfs
+        uses: robinraju/release-downloader@v1.6
+        with:
+          repository: friendlyarm/friendlywrt
+          tag: v${{ env.FRIENDLYWRT_VERSION }}
+          fileName: rk3399-rootfs-v${{ env.FRIENDLYWRT_VERSION }}.tgz
+          latest: false
+          out-file-path: ./friendlywrt
+
+      - name: 解压 rootfs
+        run: |
+          mkdir -p friendlywrt
+          tar xzf ./friendlywrt/rk3399-rootfs-v${{ env.FRIENDLYWRT_VERSION }}.tgz -C friendlywrt
+
+      - name: 更新 feeds
         run: |
           cd friendlywrt
-          cp ../configs/config_rk3399_ssr .config  # 自定义配置
-          if [ "${{ matrix.BUILD_TYPE }}" = "docker" ]; then
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 应用自定义配置
+        run: |
+          cd friendlywrt
+          cp ../configs/config_rk3399_ssr .config
+          if [ "${{ matrix.BUILD_TYPE }}" == "docker" ]; then
             echo "CONFIG_PACKAGE_docker=y" >> .config
             echo "CONFIG_PACKAGE_luci-app-dockerman=y" >> .config
           fi
-          yes "" | make olddefconfig
+          make defconfig
 
-      - name: 编译固件（固件/镜像）
+      - name: 编译 FriendlyWrt
         run: |
           cd friendlywrt
           make -j$(nproc) || make -j1 V=s
 
-      - name: 重命名并整理输出文件
+      - name: 打包镜像
         run: |
-          mkdir -p output
-          for f in friendlywrt/bin/targets/rockchip/armv8/*; do
-            filename="$(basename "$f")"
-            cp "$f" "output/${filename%.img}-${{ matrix.BUILD_TYPE }}-${{ env.DATE }}.img"
-          done
+          cd friendlywrt
+          IMG_NAME="NanoPi-M4-FriendlyWrt-${{ env.FRIENDLYWRT_VERSION }}"
+          if [ "${{ matrix.BUILD_TYPE }}" == "docker" ]; then
+            IMG_NAME="${IMG_NAME}-docker"
+          fi
+          tar czf ../artifact/${IMG_NAME}.tgz *
 
-      - name: 上传构建产物为 Artifact
-        uses: actions/upload-artifact@v4
+      - name: 上传 Release
+        uses: svenstaro/upload-release-action@v2
         with:
-          name: 固件-${{ matrix.BUILD_TYPE }}-${{ env.DATE }}
-          path: output/*
-
-      - name: 发布到 GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: "rk3399-${{ env.FRIENDLYWRT_BRANCH }}-${{ env.DATE }}"
-          name: "FriendlyWrt NanoPi M4 镜像（${{ matrix.BUILD_TYPE }}-${{ env.DATE }}）"
-          files: output/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ./artifact/NanoPi-M4-FriendlyWrt-${{ env.FRIENDLYWRT_VERSION }}${{ matrix.BUILD_TYPE == 'docker' && '-docker' || '' }}.tgz
+          asset_name: NanoPi-M4-FriendlyWrt-${{ env.FRIENDLYWRT_VERSION }}${{ matrix.BUILD_TYPE == 'docker' && '-docker' || '' }}.tgz
+          tag: "FriendlyWrt-${{ env.FRIENDLYWRT_VERSION }}-$(date +'%Y-%m-%d')"
+          overwrite: true
