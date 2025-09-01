@@ -8,7 +8,6 @@ on:
 jobs:
   prepare_release:
     runs-on: ubuntu-22.04
-    if: github.event.repository.owner.id == github.event.sender.id
     steps:
       - name: Get release tag
         id: release_tag
@@ -27,26 +26,32 @@ jobs:
           prerelease: false
     outputs:
       release_tag: ${{ steps.release_tag.outputs.release_tag }}
-      upload_url: ${{ steps.release.outputs.upload_url }}
 
   build_friendlywrt:
     needs: prepare_release
     runs-on: ubuntu-22.04
     strategy:
       matrix:
-        SET: [docker, non-docker]
+        SET: [ssr, docker]
     steps:
       - name: Checkout
         uses: actions/checkout@main
 
-      - name: Init environment
+      - name: Setup Environment
         run: |
           sudo rm -rf /etc/apt/sources.list.d
           wget https://raw.githubusercontent.com/friendlyarm/build-env-on-ubuntu-bionic/master/install.sh
           sed -i -e 's/^apt-get -y install openjdk-8-jdk/# apt-get -y install openjdk-8-jdk/g' install.sh
-          sudo -E bash ./install.sh
+          sudo bash ./install.sh
           git clone https://github.com/friendlyarm/repo
           sudo cp repo/repo /usr/bin/
+
+          # 增加 swap
+          sudo fallocate -l 4G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "Swap enabled: $(swapon --show)"
 
       - name: Download source (rk3399)
         run: |
@@ -58,15 +63,20 @@ jobs:
       - name: Apply config
         run: |
           cd project
-          [ "${{ matrix.SET }}" == "docker" ] && cp ../configs/.config.docker friendlywrt/.config || cp ../configs/.config.ssr friendlywrt/.config
+          case "${{ matrix.SET }}" in
+            ssr)
+              cp ../configs/.config.ssr friendlywrt/.config ;;
+            docker)
+              cp ../configs/.config.docker friendlywrt/.config ;;
+          esac
           cd friendlywrt
           make defconfig
 
       - name: Compile FriendlyWrt
         run: |
           cd project/friendlywrt
-          make download -j8
-          make -j$(nproc) || make -j1 V=s
+          make download -j4
+          make -j2 V=s || make -j1 V=s
 
       - name: Build SD image
         run: |
