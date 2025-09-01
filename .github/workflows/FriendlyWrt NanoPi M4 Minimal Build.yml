@@ -1,9 +1,13 @@
-name: FriendlyWrt_NanoPi_M4_Minimal
+name: FriendlyWrt NanoPi M4 Build
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}           # 手动触发
   schedule:
-    - cron: '0 0 * * 0' # 每周日 0 点触发
+    - cron: "0 0 * * 0"          # 每周日 UTC 00:00
+
+env:
+  FW_VERSION: "23.05"            # FriendlyWrt 版本
+  CPU: "rk3399"                  # NanoPi M4
 
 jobs:
   prepare_release:
@@ -12,7 +16,7 @@ jobs:
       - name: Get release tag
         id: release_tag
         run: |
-          release_tag="FriendlyWrt-$(date +%Y-%m-%d)"
+          release_tag="FriendlyWrt-NanoPiM4-${{ env.FW_VERSION }}-$(date +%Y-%m-%d)"
           echo "release_tag=$release_tag" >> $GITHUB_OUTPUT
 
       - name: Create empty release
@@ -24,104 +28,87 @@ jobs:
           tag_name: ${{ steps.release_tag.outputs.release_tag }}
           draft: false
           prerelease: false
-    outputs:
-      release_tag: ${{ steps.release_tag.outputs.release_tag }}
 
-  build_friendlywrt:
+  build_sd_image:
     needs: prepare_release
     runs-on: ubuntu-22.04
     strategy:
       matrix:
-        VERSION: ['24.10']
-        SET: [docker, non-docker]
+        SET: [docker, non-docker]   # 两种版本
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Setup environment
+      - name: Init Environment
         run: |
-          sudo apt update
-          sudo apt install -y git wget python3 curl unzip build-essential bc ccache
-          mkdir -p ~/bin
-          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
-          chmod a+x ~/bin/repo
-          export PATH=~/bin:$PATH
+          sudo rm -rf /etc/apt/sources.list.d
           wget https://raw.githubusercontent.com/friendlyarm/build-env-on-ubuntu-bionic/master/install.sh
           sudo bash ./install.sh
-          sudo git config --global user.name 'GitHub Actions'
-          sudo git config --global user.email 'noreply@github.com'
-          mkdir -p artifact
           sudo swapoff -a
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk /usr/local/share/boost /opt/ghc
+          echo "cores: $(nproc)"
 
-      - name: Download source
+      - name: Download source (minimal)
         run: |
           mkdir -p project && cd project
-          export PATH=~/bin:$PATH
-          repo init -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v${{ matrix.VERSION }} \
-            -m rk3399.xml --repo-url=https://github.com/friendlyarm/repo --no-clone-bundle
-          repo sync --no-clone-bundle
+          repo init -u https://github.com/friendlyarm/friendlywrt_manifests \
+                    -b master-v${{ env.FW_VERSION }} \
+                    -m ${CPU}.xml --repo-url=https://github.com/friendlyarm/repo
+          repo sync -c friendlywrt --no-clone-bundle
 
-      - name: Apply customizations
+      - name: Apply minimal customization (SSR Plus+)
         run: |
           cd project
-          source ../scripts/add_packages.sh
-          source ../scripts/custome_config.sh
+          # 只安装 luci-app-ssr-plus
+          echo 'src-git packages https://github.com/coolsnowwolf/packages' > feeds.conf
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a luci-app-ssr-plus
 
-      - name: Set SUFFIX
-        id: set_suffix
-        run: |
-          if [ "${{ matrix.SET }}" = "docker" ]; then
-            echo "suffix=-docker" >> $GITHUB_OUTPUT
-          else
-            echo "suffix=" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Prepare minimal config
-        run: |
-          cd project
-          cat > .config <<EOL
-CONFIG_PACKAGE_base-files=y
-CONFIG_PACKAGE_busybox=y
-CONFIG_PACKAGE_luci=y
-CONFIG_PACKAGE_luci-ssl=y
-CONFIG_PACKAGE_luci-app-ssr-plus=y
-EOL
-          make defconfig
-
-      - name: Download package
+      - name: Prepare .config
         run: |
           cd project/friendlywrt
-          make download -j8
-          find dl -size -1024c -delete
+          make defconfig
+          echo "CONFIG_PACKAGE_luci-app-ssr-plus=y" >> .config
+          if [ "${{ matrix.SET }}" == "docker" ]; then
+            echo "CONFIG_PACKAGE_docker=y" >> .config
+          fi
 
-      - name: Compile friendlyWrt
-        id: compile
-        continue-on-error: true
+      - name: Compile FriendlyWrt
         run: |
           cd project/friendlywrt
           make -j$(nproc) || make -j1 V=s
 
-      - name: Retry if failed
-        if: ${{ steps.compile.outcome == 'failure' }}
+      - name: Create rootfs package
         run: |
           cd project/friendlywrt
-          make -j1 V=s
+          [ "${{ matrix.SET }}" == "docker" ] && SUFFIX="-docker" || SUFFIX=""
+          mkdir -p ../../artifact
+          tar czf ../../artifact/rootfs-nanopi-m4${SUFFIX}.tgz ./bin/targets/rockchip/armv8/
 
-      - name: Create rootfs package
-        id: create_rootfs_package
+      - name: Build SD image
         run: |
-          cd project
-          ROOTFS_SUFFIX=${{ steps.set_suffix.outputs.suffix }}
-          ROOTFS_FILE=rootfs-friendlywrt-${{ matrix.VERSION }}$ROOTFS_SUFFIX.tgz
-          tar czf ../artifact/$ROOTFS_FILE ${FRIENDLYWRT_SRC}/${FRIENDLYWRT_ROOTFS} \
-                ${FRIENDLYWRT_SRC}/${FRIENDLYWRT_PACKAGE_DIR}
-          echo "rootfs_filename=$ROOTFS_FILE" >> $GITHUB_OUTPUT
+          cd project/friendlywrt
+          ./build.sh sd-img
+          IMG_NAME=NanoPiM4-FriendlyWrt-${{ env.FW_VERSION }}
+          [ "${{ matrix.SET }}" == "docker" ] && IMG_NAME="${IMG_NAME}-docker"
+          mv out/${IMG_NAME}.img ../../artifact/
+          cd ../../artifact
+          gzip ${IMG_NAME}.img
 
       - name: Upload rootfs
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ./artifact/${{ steps.create_rootfs_package.outputs.rootfs_filename }}
-          asset_name: ${{ steps.create_rootfs_package.outputs.rootfs_filename }}
+          file: ./artifact/rootfs-nanopi-m4${{ matrix.SET == 'docker' && '-docker' || '' }}.tgz
+          asset_name: rootfs-nanopi-m4${{ matrix.SET == 'docker' && '-docker' || '' }}.tgz
+          tag: ${{ needs.prepare_release.outputs.release_tag }}
+          overwrite: true
+
+      - name: Upload SD image
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ./artifact/NanoPiM4-FriendlyWrt-${{ env.FW_VERSION }}${{ matrix.SET == 'docker' && '-docker' || '' }}.img.gz
+          asset_name: NanoPiM4-FriendlyWrt-${{ env.FW_VERSION }}${{ matrix.SET == 'docker' && '-docker' || '' }}.img.gz
           tag: ${{ needs.prepare_release.outputs.release_tag }}
           overwrite: true
