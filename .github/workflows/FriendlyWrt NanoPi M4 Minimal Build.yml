@@ -47,15 +47,17 @@ jobs:
           sudo swapoff -a
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk /usr/local/share/boost /opt/ghc
           echo "cores: $(nproc)"
-          
-          # 安装 repo 工具
+
+          # 安装 repo 并持久化 PATH
           mkdir -p ~/bin
           curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
           chmod a+x ~/bin/repo
-          echo "export PATH=\$HOME/bin:\$PATH" >> $GITHUB_ENV
+          echo "PATH=$HOME/bin:$PATH" >> $GITHUB_ENV
 
       - name: Download source (minimal)
         run: |
+          # 确保 PATH 生效
+          export PATH=$HOME/bin:$PATH
           mkdir -p project && cd project
           repo init -u https://github.com/friendlyarm/friendlywrt_manifests \
                     -b master-v${{ env.FW_VERSION }} \
@@ -64,6 +66,7 @@ jobs:
 
       - name: Apply minimal customization (SSR Plus+)
         run: |
+          export PATH=$HOME/bin:$PATH
           cd project
           echo 'src-git packages https://github.com/coolsnowwolf/packages' > feeds.conf
           ./scripts/feeds update -a
@@ -71,6 +74,7 @@ jobs:
 
       - name: Prepare .config
         run: |
+          export PATH=$HOME/bin:$PATH
           cd project/friendlywrt
           make defconfig
           echo "CONFIG_PACKAGE_luci-app-ssr-plus=y" >> .config
@@ -80,11 +84,13 @@ jobs:
 
       - name: Compile FriendlyWrt
         run: |
+          export PATH=$HOME/bin:$PATH
           cd project/friendlywrt
           make -j$(nproc) || make -j1 V=s
 
       - name: Create rootfs package
         run: |
+          export PATH=$HOME/bin:$PATH
           cd project/friendlywrt
           [ "${{ matrix.SET }}" == "docker" ] && SUFFIX="-docker" || SUFFIX=""
           mkdir -p ../../artifact
@@ -92,6 +98,7 @@ jobs:
 
       - name: Build SD image
         run: |
+          export PATH=$HOME/bin:$PATH
           cd project/friendlywrt
           ./build.sh sd-img
           IMG_NAME=NanoPiM4-FriendlyWrt-${{ env.FW_VERSION }}
