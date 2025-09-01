@@ -1,0 +1,85 @@
+name: Build-FriendlyWrt-NanoPiM4
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * 0'   # 每周日凌晨 3 点自动编译
+
+jobs:
+  prepare_release:
+    runs-on: ubuntu-22.04
+    if: github.event.repository.owner.id == github.event.sender.id
+    steps:
+      - name: Get release tag
+        id: release_tag
+        run: |
+          release_tag="FriendlyWrt-NanoPiM4-$(date +%Y-%m-%d)"
+          echo "release_tag=$release_tag" >> $GITHUB_OUTPUT
+
+      - name: Create empty release
+        id: release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.release_tag.outputs.release_tag }}
+          draft: false
+          prerelease: false
+    outputs:
+      release_tag: ${{ steps.release_tag.outputs.release_tag }}
+      upload_url: ${{ steps.release.outputs.upload_url }}
+
+  build_friendlywrt:
+    needs: prepare_release
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        SET: [docker, non-docker]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@main
+
+      - name: Init environment
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d
+          wget https://raw.githubusercontent.com/friendlyarm/build-env-on-ubuntu-bionic/master/install.sh
+          sed -i -e 's/^apt-get -y install openjdk-8-jdk/# apt-get -y install openjdk-8-jdk/g' install.sh
+          sudo -E bash ./install.sh
+          git clone https://github.com/friendlyarm/repo
+          sudo cp repo/repo /usr/bin/
+
+      - name: Download source (rk3399)
+        run: |
+          mkdir project && cd project
+          repo init --depth=1 -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v23.05 \
+              -m rk3399.xml --repo-url=https://github.com/friendlyarm/repo --no-clone-bundle
+          repo sync -c --no-clone-bundle
+
+      - name: Apply config
+        run: |
+          cd project
+          [ "${{ matrix.SET }}" == "docker" ] && cp ../configs/.config.docker friendlywrt/.config || cp ../configs/.config.ssr friendlywrt/.config
+          cd friendlywrt
+          make defconfig
+
+      - name: Compile FriendlyWrt
+        run: |
+          cd project/friendlywrt
+          make download -j8
+          make -j$(nproc) || make -j1 V=s
+
+      - name: Build SD image
+        run: |
+          cd project
+          ./build.sh sd-img
+          mkdir -p ../artifact
+          cp out/*.img ../artifact/
+          cd ../artifact && gzip *.img
+
+      - name: Upload image
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ./artifact/*.img.gz
+          tag: ${{ needs.prepare_release.outputs.release_tag }}
+          overwrite: true
