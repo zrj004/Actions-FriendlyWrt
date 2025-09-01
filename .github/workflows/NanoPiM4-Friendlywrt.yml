@@ -75,8 +75,16 @@ jobs:
       - name: Compile FriendlyWrt
         run: |
           cd project/friendlywrt
-          make download -j4
-          make -j2 V=s || make -j1 V=s
+          make download -j4 > download.log 2>&1 || (cat download.log && exit 1)
+          make -j2 V=s > build.log 2>&1 || (cat build.log && exit 1)
+
+      - name: Upload build logs
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-logs-${{ matrix.SET }}
+          path:
+            - project/friendlywrt/build.log
+            - project/friendlywrt/download.log
 
       - name: Build SD image
         run: |
@@ -84,9 +92,10 @@ jobs:
           ./build.sh sd-img
           mkdir -p ../artifact
           cp out/*.img ../artifact/
-          cd ../artifact && gzip *.img
+          cd ../artifact
+          gzip *.img
 
-      - name: Upload image
+      - name: Upload SD image
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
