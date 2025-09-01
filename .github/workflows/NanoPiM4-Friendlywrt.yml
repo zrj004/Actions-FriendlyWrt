@@ -1,9 +1,9 @@
 name: Build-FriendlyWrt-NanoPiM4
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:           # 手动触发
   schedule:
-    - cron: '0 3 * * 0'   # 每周日凌晨 3 点自动编译
+    - cron: '0 3 * * 0'       # 每周日凌晨 3 点自动触发
 
 jobs:
   prepare_release:
@@ -73,6 +73,7 @@ jobs:
           make defconfig
 
       - name: Compile FriendlyWrt
+        id: compile
         run: |
           cd project/friendlywrt
           make download -j4 > download.log 2>&1 || (cat download.log && exit 1)
@@ -85,6 +86,20 @@ jobs:
           path:
             - project/friendlywrt/build.log
             - project/friendlywrt/download.log
+
+      - name: Retry if failed
+        if: failure()
+        run: |
+          echo "Previous step failed, retrying..."
+          cd project/friendlywrt
+          make -j1 V=s > retry_build.log 2>&1 || (cat retry_build.log && exit 1)
+
+      - name: Upload retry logs
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: retry-build-logs-${{ matrix.SET }}
+          path: project/friendlywrt/retry_build.log
 
       - name: Build SD image
         run: |
