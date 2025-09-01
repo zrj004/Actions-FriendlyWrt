@@ -1,8 +1,8 @@
-name: 自动构建 FriendlyWrt NanoPi M4
+name: 构建 FriendlyWrt NanoPi M4
 
 on:
   schedule:
-    - cron: '0 2 * * 0'  # 每周一次，UTC 时间周日 02:00
+    - cron: '0 3 * * 1'   # 每周一凌晨3点运行
   workflow_dispatch:
 
 env:
@@ -13,99 +13,115 @@ jobs:
   prepare_release:
     runs-on: ubuntu-22.04
     steps:
-    - name: 获取 release 标签
-      id: release_tag
-      run: |
-        release_tag="FriendlyWrt-$(date +%Y-%m-%d)"
-        echo "release_tag=$release_tag" >> $GITHUB_OUTPUT
+      - name: 获取 release 标签
+        id: release_tag
+        run: |
+          release_tag="FriendlyWrt-NanoPiM4-$(date +%Y-%m-%d)"
+          echo "release_tag=$release_tag" >> $GITHUB_OUTPUT
 
-    - name: 创建空 release
-      id: release
-      uses: softprops/action-gh-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ steps.release_tag.outputs.release_tag }}
-        draft: false
-        prerelease: false
+      - name: 创建空 release
+        id: release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.release_tag.outputs.release_tag }}
+          draft: false
+          prerelease: false
 
   build_friendlywrt:
     needs: prepare_release
     runs-on: ubuntu-22.04
     steps:
-    - name: Checkout
-      uses: actions/checkout@v3
+      - name: 检出仓库
+        uses: actions/checkout@v3
 
-    - name: 初始化环境
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y wget git unzip python3
-        wget https://raw.githubusercontent.com/friendlyarm/build-env-on-ubuntu-bionic/master/install.sh
-        sudo bash ./install.sh
-        git clone https://github.com/friendlyarm/repo
-        sudo cp repo/repo /usr/bin/
-        mkdir -p artifact
-        sudo swapoff -a
+      - name: 安装构建环境
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d
+          wget https://raw.githubusercontent.com/friendlyarm/build-env-on-ubuntu-bionic/master/install.sh
+          sudo bash ./install.sh
+          sudo -E git config --global user.name 'GitHub Actions'
+          sudo -E git config --global user.email 'noreply@github.com'
+          mkdir -p ./artifact
+          sudo swapoff -a
 
-    - name: 下载 FriendlyWrt 源码
-      run: |
-        mkdir -p project
-        cd project
-        repo init --depth=1 -u https://github.com/friendlyarm/friendlywrt_manifests \
-                  -b master-v${FRIENDLYWRT_VERSION} -m rk3399.xml \
-                  --repo-url=https://github.com/friendlyarm/repo --no-clone-bundle
-        repo sync -c friendlywrt --no-clone-bundle
-        repo sync -c device/friendlyelec --no-clone-bundle
-        repo sync -c scripts --no-clone-bundle
-        repo sync -c toolchain --no-clone-bundle
+      - name: 初始化 repo 并同步源码
+        run: |
+          mkdir project
+          cd project
+          repo init --depth=1 -u https://github.com/friendlyarm/friendlywrt_manifests \
+                    -b master-v${FRIENDLYWRT_VERSION} -m rk3399.xml \
+                    --repo-url=https://github.com/friendlyarm/repo --no-clone-bundle
+          repo sync -c friendlywrt --no-clone-bundle
+          repo sync -c device/friendlyelec --no-clone-bundle
+          repo sync -c scripts --no-clone-bundle
+          repo sync -c toolchain --no-clone-bundle
 
-    - name: 集成 SSR Plus+
-      run: |
-        cd project
-        mkdir -p package/custom
-        cd package/custom
-        git clone --depth=1 https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/ophub/luci-app-ssr-plus.git
-        cd ../../..
+      - name: 添加 SSR Plus+
+        run: |
+          cd project
+          mkdir -p package/custom
+          cd package/custom
+          git clone --depth=1 https://github.com/ophub/luci-app-ssr-plus.git
+          cd ../../..
 
-    - name: 准备配置和 feeds
-      run: |
-        cd project
-        SUFFIX="-docker"
-        DIRNAME=friendlywrt$(echo $FRIENDLYWRT_VERSION|awk -F . '{print $1}')${SUFFIX}
-        CONFIG=rockchip${SUFFIX}
-        cat > .current_config.mk <<EOL
-        . device/friendlyelec/rk3399/base.mk
-        TARGET_IMAGE_DIRNAME=${DIRNAME}
-        TARGET_FRIENDLYWRT_CONFIG=${CONFIG}
-        EOL
-        DEBUG_DOT_CONFIG=1 ./build.sh friendlywrt
+      - name: 准备配置和 feeds
+        run: |
+          cd project
+          DIRNAME=friendlywrt${FRIENDLYWRT_VERSION//./}
+          CONFIG=rockchip
+          cat > .current_config.mk <<EOL
+          . device/friendlyelec/rk3399/base.mk
+          TARGET_IMAGE_DIRNAME=${DIRNAME}
+          TARGET_FRIENDLYWRT_CONFIG=${CONFIG}
+          EOL
+          DEBUG_DOT_CONFIG=1 ./build.sh friendlywrt
 
-    - name: 下载依赖包
-      run: |
-        cd project/friendlywrt
-        make download -j$(nproc)
-        find dl -size -1024c -exec rm -f {} \;
+      - name: 下载依赖包
+        run: |
+          cd project/friendlywrt
+          make download -j8
+          find dl -size -1024c -exec rm -f {} \;
 
-    - name: 编译 FriendlyWrt
-      run: |
-        cd project/friendlywrt
-        make -j$(nproc) || make -j1 V=s
+      - name: 编译 FriendlyWrt rootfs
+        run: |
+          cd project/friendlywrt
+          make -j$(nproc) || make -j1 V=s
 
-    - name: 打包 rootfs
-      id: rootfs
-      run: |
-        cd project
-        source .current_config.mk
-        rootfs_filename="rootfs-friendlywrt-${FRIENDLYWRT_VERSION}-docker.tgz"
-        tar czf ../artifact/${rootfs_filename} ${FRIENDLYWRT_SRC}/${FRIENDLYWRT_ROOTFS} \
-              ${FRIENDLYWRT_SRC}/${FRIENDLYWRT_PACKAGE_DIR}
-        echo "rootfs_filename=$rootfs_filename" >> $GITHUB_OUTPUT
+      - name: 打包 rootfs
+        id: create_rootfs
+        run: |
+          cd project
+          rootfs_filename="rootfs-friendlywrt-${FRIENDLYWRT_VERSION}.tgz"
+          tar czf ../artifact/${rootfs_filename} ${FRIENDLYWRT_SRC}/${FRIENDLYWRT_ROOTFS} \
+                ${FRIENDLYWRT_SRC}/${FRIENDLYWRT_PACKAGE_DIR}
+          echo "rootfs_filename=${rootfs_filename}" >> $GITHUB_OUTPUT
 
-    - name: 上传 rootfs 到 release
-      uses: svenstaro/upload-release-action@v2
-      with:
-        repo_token: ${{ secrets.GITHUB_TOKEN }}
-        file: ./artifact/${{ steps.rootfs.outputs.rootfs_filename }}
-        asset_name: ${{ steps.rootfs.outputs.rootfs_filename }}
-        tag: ${{ needs.prepare_release.outputs.release_tag }}
-        overwrite: true
+      - name: 上传 rootfs 到 release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ./artifact/${{ steps.create_rootfs.outputs.rootfs_filename }}
+          asset_name: ${{ steps.create_rootfs.outputs.rootfs_filename }}
+          tag: ${{ needs.prepare_release.outputs.release_tag }}
+          overwrite: true
+
+      - name: 构建 SD 镜像
+        run: |
+          cd project
+          ./build.sh sd-img
+          mv out/friendlywrt*.img ../artifact/
+          cd ../artifact/
+          gzip *.img
+
+      - name: 上传 SD 镜像到 release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ./artifact/*.img.gz
+          asset_name: "$(basename *.img.gz)"
+          tag: ${{ needs.prepare_release.outputs.release_tag }}
+          overwrite: true
