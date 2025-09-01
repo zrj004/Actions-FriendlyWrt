@@ -1,0 +1,200 @@
+name: FriendlyWrt NanoPi M4 Minimal Build
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * 0'  # 每周日 0 点自动触发
+
+jobs:
+  prepare_release:
+    runs-on: ubuntu-22.04
+    if: github.event.repository.owner.id == github.event.sender.id
+    steps:
+      - name: Get release tag
+        id: release_tag
+        run: |
+          release_tag="FriendlyWrt-$(date +%Y-%m-%d)"
+          echo "##[set-output name=release_tag;]$release_tag"
+
+      - name: Create empty release
+        id: release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.release_tag.outputs.release_tag }}
+          draft: false
+          prerelease: false
+    outputs:
+      release_tag: ${{ steps.release_tag.outputs.release_tag }}
+      upload_url: ${{ steps.release.outputs.upload_url }}
+
+  build_friendlywrt:
+    needs: prepare_release
+    runs-on: ubuntu-22.04
+    if: github.event.repository.owner.id == github.event.sender.id
+    strategy:
+      matrix:
+        VERSION: ['24.10']
+        SET: [docker, non-docker]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@main
+
+      - name: Init environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt update
+          sudo apt install -y git wget python3 curl unzip build-essential bc ccache
+          
+          # 安装 repo
+          mkdir -p ~/bin
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          export PATH=~/bin:$PATH
+          repo --version
+
+          wget https://raw.githubusercontent.com/friendlyarm/build-env-on-ubuntu-bionic/master/install.sh
+          sudo -E bash ./install.sh
+          sudo -E git config --global user.name 'GitHub Actions'
+          sudo -E git config --global user.email 'noreply@github.com'
+          mkdir -p ./artifact
+          sudo swapoff -a
+
+      - name: Download source
+        run: |
+          mkdir -p project
+          cd project
+          export PATH=~/bin:$PATH
+          repo init -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v${{ matrix.VERSION }} \
+            -m rk3399.xml --repo-url=https://github.com/friendlyarm/repo --no-clone-bundle
+          repo sync --no-clone-bundle
+
+      - name: Apply customizations
+        run: |
+          cd project
+          source ../scripts/add_packages.sh
+          source ../scripts/custome_config.sh
+
+      - name: Prepare minimal config
+        run: |
+          cd project
+          [ "${{ matrix.SET }}" == "docker" ] && SUFFIX="-docker" || SUFFIX=""
+          
+          # 生成 minimal .config 文件，只保留基础 + ShadowSocksR Plus+
+          cat > .config <<EOL
+CONFIG_PACKAGE_base-files=y
+CONFIG_PACKAGE_busybox=y
+CONFIG_PACKAGE_luci=y
+CONFIG_PACKAGE_luci-ssl=y
+CONFIG_PACKAGE_luci-app-ssr-plus=y
+EOL
+          make defconfig
+
+      - name: Download package
+        run: |
+          cd project/friendlywrt
+          make download -j8
+          find dl -size -1024c -exec ls -l {} \;
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: Compile friendlyWrt
+        id: compile
+        continue-on-error: true
+        run: |
+          cd project/friendlywrt
+          make -j$(nproc) || make -j1 V=s
+          echo $?
+
+      - name: Check the result and try again
+        if: steps.compile.outcome == 'failure'
+        run: |
+          cd project/friendlywrt
+          make -j1 V=s
+
+      - name: Create rootfs package
+        id: create_rootfs_package
+        run: |
+          cd project
+          [ "${{ matrix.SET }}" == "docker" ] && SUFFIX="-docker" || SUFFIX=""
+          rootfs_filename="rootfs-friendlywrt-${{ matrix.VERSION }}${SUFFIX}.tgz"
+          tar cvzf ../artifact/${rootfs_filename} ${FRIENDLYWRT_SRC}/${FRIENDLYWRT_ROOTFS} \
+                ${FRIENDLYWRT_SRC}/${FRIENDLYWRT_PACKAGE_DIR}
+          echo "##[set-output name=rootfs_filename;]$rootfs_filename"
+
+      - name: Upload rootfs package
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ./artifact/${{ steps.create_rootfs_package.outputs.rootfs_filename }}
+          asset_name: ${{ steps.create_rootfs_package.outputs.rootfs_filename }}
+          tag: ${{ needs.prepare_release.outputs.release_tag }}
+          overwrite: true
+
+  build_img:
+    needs: [prepare_release, build_friendlywrt]
+    runs-on: ubuntu-22.04
+    if: github.event.repository.owner.id == github.event.sender.id
+    strategy:
+      matrix:
+        VERSION: ['24.10']
+        CPU: [rk3399]
+        SET: [docker, non-docker]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@main
+
+      - name: Init environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt update
+          sudo apt install -y git wget python3 curl unzip build-essential bc ccache
+          mkdir -p ~/bin
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          export PATH=~/bin:$PATH
+          repo --version
+          wget https://raw.githubusercontent.com/friendlyarm/build-env-on-ubuntu-bionic/master/install.sh
+          sudo -E bash ./install.sh
+          sudo -E git config --global user.name 'GitHub Actions'
+          sudo -E git config --global user.email 'noreply@github.com'
+          mkdir -p ./artifact
+          sudo swapoff -a
+
+      - name: Download friendlywrt rootfs
+        uses: robinraju/release-downloader@v1.6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          repository: ${{ github.repository }}
+          tag: ${{ needs.prepare_release.outputs.release_tag }}
+          fileName: "rootfs-friendlywrt-${{ matrix.VERSION }}${{ matrix.SET == 'docker' && '-docker' || '' }}.tgz"
+
+      - name: Compile uboot and kernel
+        run: |
+          cd project
+          ./build.sh uboot
+          ./build.sh kernel
+
+      - name: Build sd image
+        id: build_sd_image
+        run: |
+          cd project
+          ./build.sh sd-img
+          mv out/* ../artifact/
+          cd ../artifact/
+          gzip *.img
+          echo "##[set-output name=img_filename;]$(ls *.img.gz)"
+
+      - name: Upload image to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ./artifact/${{ steps.build_sd_image.outputs.img_filename }}
+          asset_name: ${{ steps.build_sd_image.outputs.img_filename }}
+          tag: ${{ needs.prepare_release.outputs.release_tag }}
+          overwrite: true
