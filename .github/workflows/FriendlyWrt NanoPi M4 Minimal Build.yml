@@ -8,7 +8,6 @@ on:
 jobs:
   prepare_release:
     runs-on: ubuntu-22.04
-    if: github.event.repository.owner.id == github.event.sender.id
     steps:
       - name: Get release tag
         id: release_tag
@@ -32,19 +31,15 @@ jobs:
   build_friendlywrt:
     needs: prepare_release
     runs-on: ubuntu-22.04
-    if: github.event.repository.owner.id == github.event.sender.id
     strategy:
       matrix:
         VERSION: ['24.10']
         SET: [docker, non-docker]
-
     steps:
       - name: Checkout
         uses: actions/checkout@main
 
       - name: Init environment
-        env:
-          DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt update
           sudo apt install -y git wget python3 curl unzip build-essential bc ccache
@@ -80,8 +75,11 @@ jobs:
       - name: Prepare minimal config
         run: |
           cd project
-          [ "${{ matrix.SET }}" == "docker" ] && SUFFIX="-docker" || SUFFIX=""
-          
+          SUFFIX=""
+          if [ "${{ matrix.SET }}" == "docker" ]; then
+            SUFFIX="-docker"
+          fi
+
           cat > .config <<EOL
 CONFIG_PACKAGE_base-files=y
 CONFIG_PACKAGE_busybox=y
@@ -90,6 +88,7 @@ CONFIG_PACKAGE_luci-ssl=y
 CONFIG_PACKAGE_luci-app-ssr-plus=y
 EOL
           make defconfig
+          echo "SUFFIX=$SUFFIX" >> $GITHUB_OUTPUT
 
       - name: Download package
         run: |
@@ -104,7 +103,7 @@ EOL
         run: |
           cd project/friendlywrt
           make -j$(nproc) || make -j1 V=s
-          echo $? 
+          echo $?
 
       - name: Check the result and try again
         if: steps.compile.outcome == 'failure'
@@ -116,8 +115,8 @@ EOL
         id: create_rootfs_package
         run: |
           cd project
-          [ "${{ matrix.SET }}" == "docker" ] && SUFFIX="-docker" || SUFFIX=""
-          rootfs_filename="rootfs-friendlywrt-${{ matrix.VERSION }}${SUFFIX}.tgz"
+          ROOTFS_SUFFIX=${{ steps.prepare_minimal_config.outputs.SUFFIX || "" }}
+          rootfs_filename="rootfs-friendlywrt-${{ matrix.VERSION }}$ROOTFS_SUFFIX.tgz"
           tar cvzf ../artifact/${rootfs_filename} ${FRIENDLYWRT_SRC}/${FRIENDLYWRT_ROOTFS} \
                 ${FRIENDLYWRT_SRC}/${FRIENDLYWRT_PACKAGE_DIR}
           echo "rootfs_filename=$rootfs_filename" >> $GITHUB_OUTPUT
@@ -134,20 +133,16 @@ EOL
   build_img:
     needs: [prepare_release, build_friendlywrt]
     runs-on: ubuntu-22.04
-    if: github.event.repository.owner.id == github.event.sender.id
     strategy:
       matrix:
         VERSION: ['24.10']
         CPU: [rk3399]
         SET: [docker, non-docker]
-
     steps:
       - name: Checkout
         uses: actions/checkout@main
 
       - name: Init environment
-        env:
-          DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt update
           sudo apt install -y git wget python3 curl unzip build-essential bc ccache
@@ -164,13 +159,12 @@ EOL
           sudo swapoff -a
 
       - name: Download friendlywrt rootfs
-        uses: robinraju/release-downloader@v1.6
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          repository: ${{ github.repository }}
-          tag: ${{ needs.prepare_release.outputs.release_tag }}
-          fileName: "rootfs-friendlywrt-${{ matrix.VERSION }}${{ matrix.SET == 'docker' && '-docker' || '' }}.tgz"
+        run: |
+          SUFFIX=""
+          if [ "${{ matrix.SET }}" == "docker" ]; then
+            SUFFIX="-docker"
+          fi
+          curl -L -o rootfs.tgz https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare_release.outputs.release_tag }}/rootfs-friendlywrt-${{ matrix.VERSION }}$SUFFIX.tgz
 
       - name: Compile uboot and kernel
         run: |
