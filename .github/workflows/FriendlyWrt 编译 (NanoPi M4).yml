@@ -2,90 +2,98 @@ name: FriendlyWrt 自动构建
 
 on:
   schedule:
-    - cron: '0 3 * * 1'  # 每周一凌晨3点执行
+    - cron: '0 3 * * 1'  # 每周一凌晨3点
   workflow_dispatch:
+
+env:
+  FRIENDLYWRT_VERSION: "24.10"
+  CPU_MODEL: "rk3399"
+  SSR_FEED: "https://github.com/ophub/luci-app-ssr-plus.git"
 
 jobs:
   prepare_release:
     runs-on: ubuntu-22.04
     steps:
-    - name: 获取 Release 标签
-      id: release_tag
-      run: |
-        release_tag="FriendlyWrt-$(date +%Y-%m-%d)"
-        echo "##[set-output name=release_tag;]$release_tag"
+      - name: 获取 Release 标签
+        id: release_tag
+        run: |
+          release_tag="FriendlyWrt-$(date +%Y-%m-%d)"
+          echo "release_tag=$release_tag" >> $GITHUB_OUTPUT
 
-    - name: 创建空 Release
-      id: release
-      uses: softprops/action-gh-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ steps.release_tag.outputs.release_tag }}
-        draft: false
-        prerelease: false
+      - name: 创建空 Release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.release_tag.outputs.release_tag }}
+          draft: false
+          prerelease: false
 
     outputs:
       release_tag: ${{ steps.release_tag.outputs.release_tag }}
 
-  build_friendlywrt:
+  build_rootfs:
     needs: prepare_release
     runs-on: ubuntu-22.04
     strategy:
       matrix:
-        VERSION: ['23.05', '24.10']
         SET: [docker, non-docker]
 
     steps:
-    - name: 初始化环境
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y unzip wget git build-essential libncurses5-dev zlib1g-dev python3-distutils
-        curl -fsSL https://get.docker.com | sh || true
-        sudo systemctl enable --now docker || true
-        echo "环境初始化完成"
+      - name: 安装基础工具
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip wget git build-essential libncurses5-dev zlib1g-dev python3-distutils
+          curl -fsSL https://get.docker.com | sh || true
+          sudo systemctl enable --now docker || true
 
-    - name: 下载 FriendlyWrt rootfs
-      run: |
-        mkdir -p friendlywrt
-        cd friendlywrt
-        # 注意：请确保 Release 中有对应的 rootfs 文件
-        FILE="rootfs-friendlywrt-${{ matrix.VERSION }}${{ matrix.SET == 'docker' && '-docker' || '' }}.tgz"
-        wget -O $FILE "https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare_release.outputs.release_tag }}/$FILE"
-        cd ..
+      - name: 下载 FriendlyWrt rootfs
+        run: |
+          mkdir -p friendlywrt
+          cd friendlywrt
+          FILE="rootfs-friendlywrt-${FRIENDLYWRT_VERSION}${{ matrix.SET == 'docker' && '-docker' || '' }}.tgz"
+          wget -O $FILE "https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare_release.outputs.release_tag }}/$FILE"
+          cd ..
 
-    - name: 解压 rootfs
-      run: |
-        mkdir -p project
-        tar xvzf ./friendlywrt/rootfs-friendlywrt-${{ matrix.VERSION }}${{ matrix.SET == 'docker' && '-docker' || '' }}.tgz -C project
+      - name: 解压 rootfs
+        run: |
+          mkdir -p project
+          tar xvzf ./friendlywrt/rootfs-friendlywrt-${FRIENDLYWRT_VERSION}${{ matrix.SET == 'docker' && '-docker' || '' }}.tgz -C project
 
-    - name: 编译 FriendlyWrt
-      run: |
-        cd project
-        [ "${{ matrix.SET }}" == "docker" ] && SUFFIX="-docker" || SUFFIX=""
-        DIRNAME=friendlywrt$(echo ${{ matrix.VERSION }}|awk -F . '{print $1}')${SUFFIX}
-        CONFIG=rockchip${SUFFIX}
-        cat > .current_config.mk <<EOL
-        . device/friendlyelec/rk3399/base.mk
-        TARGET_IMAGE_DIRNAME=${DIRNAME}
-        TARGET_FRIENDLYWRT_CONFIG=${CONFIG}
-        EOL
-        make olddefconfig
-        make -j$(nproc)
+      - name: 集成 SSR Plus+
+        run: |
+          mkdir -p project/package/custom
+          cd project/package/custom
+          git clone --depth=1 $SSR_FEED
+          cd ../../..
 
-    - name: 打包 rootfs
-      run: |
-        cd project
-        ROOTFS_FILE="../artifact/rootfs-friendlywrt-${{ matrix.VERSION }}${{ SUFFIX }}.tgz"
-        mkdir -p ../artifact
-        tar czf $ROOTFS_FILE ${FRIENDLYWRT_ROOTFS:-rootfs} ${FRIENDLYWRT_PACKAGE_DIR:-package}
-        echo "##[set-output name=rootfs_file;]$ROOTFS_FILE"
+      - name: 编译 rootfs
+        run: |
+          cd project
+          [ "${{ matrix.SET }}" == "docker" ] && SUFFIX="-docker" || SUFFIX=""
+          DIRNAME=friendlywrt$(echo $FRIENDLYWRT_VERSION|awk -F . '{print $1}')${SUFFIX}
+          CONFIG=rockchip${SUFFIX}
+          cat > .current_config.mk <<EOL
+          . device/friendlyelec/${CPU_MODEL}/base.mk
+          TARGET_IMAGE_DIRNAME=${DIRNAME}
+          TARGET_FRIENDLYWRT_CONFIG=${CONFIG}
+          EOL
+          make olddefconfig
+          make -j$(nproc)
 
-    - name: 上传 rootfs 到 Release
-      uses: svenstaro/upload-release-action@v2
-      with:
-        repo_token: ${{ secrets.GITHUB_TOKEN }}
-        file: ./artifact/rootfs-friendlywrt-${{ matrix.VERSION }}${{ matrix.SET == 'docker' && '-docker' || '' }}.tgz
-        asset_name: rootfs-friendlywrt-${{ matrix.VERSION }}${{ matrix.SET == 'docker' && '-docker' || '' }}.tgz
-        tag: ${{ needs.prepare_release.outputs.release_tag }}
-        overwrite: true
+      - name: 打包 rootfs
+        run: |
+          cd project
+          ROOTFS_FILE="../artifact/rootfs-friendlywrt-${FRIENDLYWRT_VERSION}${SUFFIX}.tgz"
+          mkdir -p ../artifact
+          tar czf $ROOTFS_FILE ${FRIENDLYWRT_ROOTFS:-rootfs} ${FRIENDLYWRT_PACKAGE_DIR:-package}
+          echo "rootfs_file=$ROOTFS_FILE" >> $GITHUB_OUTPUT
+
+      - name: 上传 rootfs 到 Release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ./artifact/rootfs-friendlywrt-${FRIENDLYWRT_VERSION}${{ matrix.SET == 'docker' && '-docker' || '' }}.tgz
+          asset_name: rootfs-friendlywrt-${FRIENDLYWRT_VERSION}${{ matrix.SET == 'docker' && '-docker' || '' }}.tgz
+          tag: ${{ needs.prepare_release.outputs.release_tag }}
+          overwrite: true
