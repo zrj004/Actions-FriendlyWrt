@@ -1,0 +1,91 @@
+name: OpenWrt-NanoPiM4
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * 0"   # 每周日凌晨 2 点自动编译
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  FEEDS_CONF: feeds.conf.default
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: 初始化环境
+      run: |
+        sudo apt-get update
+        sudo apt-get -y install build-essential ccache ecj fastjar file g++ gawk \
+        gettext git java-propose-classpath libelf-dev libncurses5-dev \
+        libncursesw5-dev libssl-dev python3 python3-pip python3-setuptools \
+        python3-distutils rsync subversion swig unzip wget zlib1g-dev
+
+    - name: 拉取 OpenWrt 源码
+      run: |
+        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        cd openwrt
+        echo "src-git packages https://github.com/coolsnowwolf/packages" > feeds.conf.default
+        echo "src-git luci https://github.com/coolsnowwolf/luci" >> feeds.conf.default
+
+    - name: 更新 feeds
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: 编译精简版 (SSR Plus+)
+      run: |
+        cd openwrt
+        rm -f .config
+        cat >> .config <<EOF
+        CONFIG_TARGET_rockchip=y
+        CONFIG_TARGET_rockchip_armv8=y
+        CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-m4=y
+        CONFIG_PACKAGE_luci=y
+        CONFIG_PACKAGE_luci-ssl=y
+        CONFIG_PACKAGE_luci-app-ssr-plus=y
+        CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Server=n
+        CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_V2ray_Plugin=n
+        CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Xray=n
+        EOF
+        make defconfig
+        make -j$(nproc) || make -j1 V=s
+        cp -r bin/targets ./bin-ssr
+
+    - name: 编译扩展版 (SSR Plus+ + Docker)
+      run: |
+        cd openwrt
+        rm -f .config
+        cat >> .config <<EOF
+        CONFIG_TARGET_rockchip=y
+        CONFIG_TARGET_rockchip_armv8=y
+        CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-m4=y
+        CONFIG_PACKAGE_luci=y
+        CONFIG_PACKAGE_luci-ssl=y
+        CONFIG_PACKAGE_luci-app-ssr-plus=y
+        CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Server=n
+        CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_V2ray_Plugin=n
+        CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Xray=n
+        CONFIG_PACKAGE_docker=y
+        CONFIG_PACKAGE_dockerd=y
+        CONFIG_PACKAGE_luci-app-docker=y
+        EOF
+        make defconfig
+        make -j$(nproc) || make -j1 V=s
+        cp -r bin/targets ./bin-docker
+
+    - name: 上传到 Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          openwrt/bin-ssr/targets/rockchip/armv8/*
+          openwrt/bin-docker/targets/rockchip/armv8/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
