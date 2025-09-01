@@ -1,80 +1,93 @@
-name: 构建 FriendlyWrt NanoPi M4 镜像
+name: FriendlyWrt 每周构建
 
-# 每周一凌晨 2 点自动触发
 on:
   schedule:
-    - cron: '0 2 * * 1'
-  workflow_dispatch: # 允许手动触发
+    - cron: '0 2 * * 1'   # 每周一 2:00
+  workflow_dispatch:
 
 jobs:
-  build:
+  prepare_release:
     runs-on: ubuntu-22.04
-    env:
-      FRIENDLYWRT_VERSION: "24.10"
-      CPU: rk3399
     steps:
-    - name: 设置中文标签
-      run: |
-        DATE=$(date +'%Y-%m-%d')
-        RELEASE_TAG="FriendlyWrt-RK${CPU}-${FRIENDLYWRT_VERSION}-${DATE}"
-        echo "RELEASE_TAG=${RELEASE_TAG}" >> $GITHUB_ENV
+      - name: 生成发布标签
+        id: release_tag
+        run: |
+          RELEASE_TAG="FriendlyWrt-$(date +'%Y-%m-%d')"
+          echo "RELEASE_TAG=${RELEASE_TAG}" >> $GITHUB_ENV
+          echo "##[set-output name=release_tag;]$RELEASE_TAG"
 
-    - name: Checkout Workflow 仓库
-      uses: actions/checkout@v3
+      - name: 创建 Release
+        id: release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.release_tag.outputs.release_tag }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: 安装基础依赖
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential unzip wget git python3-distutils libncurses5-dev zlib1g-dev gawk flex quilt rsync bc sudo gettext
-        curl -fsSL https://get.docker.com | sh || true
-        sudo usermod -aG docker $USER
+  build_friendlywrt:
+    needs: prepare_release
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        VERSION: ['23.05', '24.10']
+        SET: ['docker', 'non-docker']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
 
-    - name: 克隆 FriendlyWrt 源码
-      run: |
-        git clone --depth=1 https://github.com/friendlyarm/friendlywrt.git -b master friendlywrt
+      - name: 初始化环境
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential unzip wget git python3-distutils libncurses5-dev zlib1g-dev
+          curl -fsSL https://get.docker.com | sh || true
+          sudo usermod -aG docker $USER
 
-    - name: 初始化 feeds 并只拉 SSR Plus+
-      run: |
-        cd friendlywrt
-        mkdir -p package/custom
-        # 添加 SSR Plus+ feed
-        echo "src-git custom https://github.com/ophub/luci-app-ssr-plus.git" > feeds.conf.custom
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
+      - name: 下载 FriendlyWrt rootfs
+        uses: robinraju/release-downloader@v1.6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          repository: ${{ github.repository }}
+          tag: ${{ needs.prepare_release.outputs.release_tag }}
+          fileName: "rootfs-friendlywrt-${{ matrix.VERSION }}${{ matrix.SET == 'docker' && '-docker' || '' }}.tgz"
+          out-file-path: ./friendlywrt
+          latest: false
+          tarBall: false
+          zipBall: false
 
-    - name: 默认配置
-      run: |
-        cd friendlywrt
-        make defconfig
+      - name: 解压 rootfs
+        run: |
+          mkdir -p project
+          tar xvzf ./friendlywrt/rootfs-friendlywrt-${{ matrix.VERSION }}${{ matrix.SET == 'docker' && '-docker' || '' }}.tgz -C project
 
-    - name: 编译 FriendlyWrt rootfs + 镜像
-      run: |
-        cd friendlywrt
-        make -j$(nproc) || make -j1 V=s
+      - name: 仅拉 SSR Plus+ feed
+        run: |
+          cd project
+          mkdir -p package/custom
+          echo "src-git custom https://github.com/ophub/luci-app-ssr-plus.git" > feeds.conf.custom
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          make defconfig
 
-    - name: 打包生成 artifact
-      run: |
-        cd friendlywrt
-        mkdir -p ../artifact
-        TAR_NAME="friendlywrt-${CPU}-${FRIENDLYWRT_VERSION}.tar.gz"
-        tar czf ../artifact/${TAR_NAME} bin/ package/ build_dir/ 
-        echo "TAR_NAME=${TAR_NAME}" >> $GITHUB_ENV
+      - name: 编译 FriendlyWrt
+        run: |
+          cd project
+          make -j$(nproc) || make -j1 V=s
 
-    - name: 创建 GitHub Release
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: ${{ env.RELEASE_TAG }}
-        name: ${{ env.RELEASE_TAG }}
-        draft: false
-        prerelease: false
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: 打包 rootfs
+        run: |
+          cd project
+          mkdir -p ../artifact
+          ROOTFS_TGZ="rootfs-friendlywrt-${{ matrix.VERSION }}${{ matrix.SET == 'docker' && '-docker' || '' }}.tgz"
+          tar czf ../artifact/${ROOTFS_TGZ} *
 
-    - name: 上传 artifact 到 Release
-      uses: svenstaro/upload-release-action@v2
-      with:
-        repo_token: ${{ secrets.GITHUB_TOKEN }}
-        file: ./artifact/${{ env.TAR_NAME }}
-        asset_name: ${{ env.TAR_NAME }}
-        tag: ${{ env.RELEASE_TAG }}
-        overwrite: true
+      - name: 上传 rootfs 到 Release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ./artifact/${ROOTFS_TGZ}
+          asset_name: ${ROOTFS_TGZ}
+          tag: ${{ needs.prepare_release.outputs.release_tag }}
+          overwrite: true
