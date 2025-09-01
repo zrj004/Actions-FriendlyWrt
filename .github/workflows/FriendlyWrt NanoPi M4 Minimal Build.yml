@@ -14,7 +14,7 @@ jobs:
         id: release_tag
         run: |
           release_tag="FriendlyWrt-$(date +%Y-%m-%d)"
-          echo "##[set-output name=release_tag;]$release_tag"
+          echo "release_tag=$release_tag" >> $GITHUB_OUTPUT
 
       - name: Create empty release
         id: release
@@ -48,8 +48,7 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y git wget python3 curl unzip build-essential bc ccache
-          
-          # 安装 repo
+
           mkdir -p ~/bin
           curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
           chmod a+x ~/bin/repo
@@ -83,7 +82,6 @@ jobs:
           cd project
           [ "${{ matrix.SET }}" == "docker" ] && SUFFIX="-docker" || SUFFIX=""
           
-          # 生成 minimal .config 文件，只保留基础 + ShadowSocksR Plus+
           cat > .config <<EOL
 CONFIG_PACKAGE_base-files=y
 CONFIG_PACKAGE_busybox=y
@@ -106,7 +104,7 @@ EOL
         run: |
           cd project/friendlywrt
           make -j$(nproc) || make -j1 V=s
-          echo $?
+          echo $? 
 
       - name: Check the result and try again
         if: steps.compile.outcome == 'failure'
@@ -122,7 +120,7 @@ EOL
           rootfs_filename="rootfs-friendlywrt-${{ matrix.VERSION }}${SUFFIX}.tgz"
           tar cvzf ../artifact/${rootfs_filename} ${FRIENDLYWRT_SRC}/${FRIENDLYWRT_ROOTFS} \
                 ${FRIENDLYWRT_SRC}/${FRIENDLYWRT_PACKAGE_DIR}
-          echo "##[set-output name=rootfs_filename;]$rootfs_filename"
+          echo "rootfs_filename=$rootfs_filename" >> $GITHUB_OUTPUT
 
       - name: Upload rootfs package
         uses: svenstaro/upload-release-action@v2
@@ -188,7 +186,7 @@ EOL
           mv out/* ../artifact/
           cd ../artifact/
           gzip *.img
-          echo "##[set-output name=img_filename;]$(ls *.img.gz)"
+          echo "img_filename=$(ls *.img.gz)" >> $GITHUB_OUTPUT
 
       - name: Upload image to release
         uses: svenstaro/upload-release-action@v2
