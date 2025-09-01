@@ -1,9 +1,9 @@
-name: FriendlyWrt NanoPi M4 Minimal Build
+name: FriendlyWrt_NanoPi_M4_Minimal
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * 0'  # 每周日 0 点自动触发
+    - cron: '0 0 * * 0' # 每周日 0 点触发
 
 jobs:
   prepare_release:
@@ -26,7 +26,6 @@ jobs:
           prerelease: false
     outputs:
       release_tag: ${{ steps.release_tag.outputs.release_tag }}
-      upload_url: ${{ steps.release.outputs.upload_url }}
 
   build_friendlywrt:
     needs: prepare_release
@@ -37,29 +36,26 @@ jobs:
         SET: [docker, non-docker]
     steps:
       - name: Checkout
-        uses: actions/checkout@main
+        uses: actions/checkout@v3
 
-      - name: Init environment
+      - name: Setup environment
         run: |
           sudo apt update
           sudo apt install -y git wget python3 curl unzip build-essential bc ccache
           mkdir -p ~/bin
-          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
           chmod a+x ~/bin/repo
           export PATH=~/bin:$PATH
-          repo --version
-
           wget https://raw.githubusercontent.com/friendlyarm/build-env-on-ubuntu-bionic/master/install.sh
-          sudo -E bash ./install.sh
-          sudo -E git config --global user.name 'GitHub Actions'
-          sudo -E git config --global user.email 'noreply@github.com'
-          mkdir -p ./artifact
+          sudo bash ./install.sh
+          sudo git config --global user.name 'GitHub Actions'
+          sudo git config --global user.email 'noreply@github.com'
+          mkdir -p artifact
           sudo swapoff -a
 
       - name: Download source
         run: |
-          mkdir -p project
-          cd project
+          mkdir -p project && cd project
           export PATH=~/bin:$PATH
           repo init -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v${{ matrix.VERSION }} \
             -m rk3399.xml --repo-url=https://github.com/friendlyarm/repo --no-clone-bundle
@@ -74,11 +70,11 @@ jobs:
       - name: Set SUFFIX
         id: set_suffix
         run: |
-          SUFFIX=""
-          if [ "${{ matrix.SET }}" == "docker" ]; then
-            SUFFIX="-docker"
+          if [ "${{ matrix.SET }}" = "docker" ]; then
+            echo "suffix=-docker" >> $GITHUB_OUTPUT
+          else
+            echo "suffix=" >> $GITHUB_OUTPUT
           fi
-          echo "suffix=$SUFFIX" >> $GITHUB_OUTPUT
 
       - name: Prepare minimal config
         run: |
@@ -96,7 +92,7 @@ EOL
         run: |
           cd project/friendlywrt
           make download -j8
-          find dl -size -1024c -exec rm -f {} \;
+          find dl -size -1024c -delete
 
       - name: Compile friendlyWrt
         id: compile
@@ -105,7 +101,7 @@ EOL
           cd project/friendlywrt
           make -j$(nproc) || make -j1 V=s
 
-      - name: Retry on failure
+      - name: Retry if failed
         if: steps.compile.outcome == 'failure'
         run: |
           cd project/friendlywrt
@@ -116,12 +112,12 @@ EOL
         run: |
           cd project
           ROOTFS_SUFFIX=${{ steps.set_suffix.outputs.suffix }}
-          rootfs_filename="rootfs-friendlywrt-${{ matrix.VERSION }}$ROOTFS_SUFFIX.tgz"
-          tar cvzf ../artifact/${rootfs_filename} ${FRIENDLYWRT_SRC}/${FRIENDLYWRT_ROOTFS} \
+          ROOTFS_FILE=rootfs-friendlywrt-${{ matrix.VERSION }}$ROOTFS_SUFFIX.tgz
+          tar czf ../artifact/$ROOTFS_FILE ${FRIENDLYWRT_SRC}/${FRIENDLYWRT_ROOTFS} \
                 ${FRIENDLYWRT_SRC}/${FRIENDLYWRT_PACKAGE_DIR}
-          echo "rootfs_filename=$rootfs_filename" >> $GITHUB_OUTPUT
+          echo "rootfs_filename=$ROOTFS_FILE" >> $GITHUB_OUTPUT
 
-      - name: Upload rootfs package
+      - name: Upload rootfs
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
@@ -140,39 +136,38 @@ EOL
         SET: [docker, non-docker]
     steps:
       - name: Checkout
-        uses: actions/checkout@main
+        uses: actions/checkout@v3
 
-      - name: Init environment
+      - name: Setup environment
         run: |
           sudo apt update
           sudo apt install -y git wget python3 curl unzip build-essential bc ccache
           mkdir -p ~/bin
-          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
           chmod a+x ~/bin/repo
           export PATH=~/bin:$PATH
-          repo --version
           wget https://raw.githubusercontent.com/friendlyarm/build-env-on-ubuntu-bionic/master/install.sh
-          sudo -E bash ./install.sh
-          sudo -E git config --global user.name 'GitHub Actions'
-          sudo -E git config --global user.email 'noreply@github.com'
-          mkdir -p ./artifact
+          sudo bash ./install.sh
+          sudo git config --global user.name 'GitHub Actions'
+          sudo git config --global user.email 'noreply@github.com'
+          mkdir -p artifact
           sudo swapoff -a
 
-      - name: Download friendlywrt rootfs
+      - name: Download rootfs
         run: |
           SUFFIX=""
-          if [ "${{ matrix.SET }}" == "docker" ]; then
+          if [ "${{ matrix.SET }}" = "docker" ]; then
             SUFFIX="-docker"
           fi
           curl -L -o rootfs.tgz https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare_release.outputs.release_tag }}/rootfs-friendlywrt-${{ matrix.VERSION }}$SUFFIX.tgz
 
-      - name: Compile uboot and kernel
+      - name: Compile uboot & kernel
         run: |
           cd project
           ./build.sh uboot
           ./build.sh kernel
 
-      - name: Build sd image
+      - name: Build SD image
         id: build_sd_image
         run: |
           cd project
@@ -182,7 +177,7 @@ EOL
           gzip *.img
           echo "img_filename=$(ls *.img.gz)" >> $GITHUB_OUTPUT
 
-      - name: Upload image to release
+      - name: Upload image
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
