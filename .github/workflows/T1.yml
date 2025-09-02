@@ -1,4 +1,4 @@
-name: Build FriendlyWrt NanoPi M4 Lite (Stable)
+name: Build FriendlyWrt NanoPi M4 Lite (Stable + Clean)
 
 on:
   workflow_dispatch:
@@ -18,9 +18,8 @@ jobs:
             build-essential flex bison gawk gcc-multilib g++-multilib \
             gettext libncurses5-dev libssl-dev python3-distutils \
             python3-setuptools python3-pip python3-pyelftools \
-            rsync unzip file wget git curl
+            m4 automake autoconf unzip rsync file wget git curl
 
-          # 升级 pip 并确保 pyelftools 可用
           python3 -m pip install --upgrade pip
           python3 -m pip install pyelftools
 
@@ -30,10 +29,15 @@ jobs:
           cd friendlywrt
           ls -l
 
-      - name: Prepare config for NanoPi M4 Lite
+      - name: Clean previous build
         run: |
           cd friendlywrt
           make distclean
+          rm -rf staging_dir build_dir
+
+      - name: Prepare config for NanoPi M4 Lite
+        run: |
+          cd friendlywrt
 
           # 初始化 feeds
           ./scripts/feeds update -a
@@ -71,15 +75,20 @@ jobs:
 
           make defconfig
 
+      - name: Compile host tools (single thread)
+        run: |
+          cd friendlywrt
+          make -j1 V=s tools/compile
+
       - name: Compile target/linux (single thread)
         run: |
           cd friendlywrt
-          make target/compile V=s -j1
+          make -j1 V=s target/compile
 
       - name: Compile packages (single thread)
         run: |
           cd friendlywrt
-          make package/compile V=s -j1
+          make -j1 V=s package/compile
 
       - name: Build full firmware image (single thread)
         run: |
