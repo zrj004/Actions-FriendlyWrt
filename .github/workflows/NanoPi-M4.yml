@@ -29,15 +29,14 @@ jobs:
           path: |
             project/friendlywrt/dl
             project/friendlywrt/build_dir/host
-          key: friendlywrt-dl-build
-          restore-keys: friendlywrt-dl-build
+          key: friendlywrt-dl-build-${{ matrix.SET }}
+          restore-keys: friendlywrt-dl-build-
 
       - name: Download source (rk3399, v24.10)
         run: |
           mkdir -p project && cd project
           repo init --depth=1 -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v24.10 \
                    -m rk3399.xml --repo-url=https://github.com/friendlyarm/repo --no-clone-bundle
-          # 只同步必要 repo，提高效率
           repo sync -c friendlywrt --no-clone-bundle
           repo sync -c kernel --no-clone-bundle
           repo sync -c u-boot --no-clone-bundle
@@ -80,20 +79,35 @@ EOF
 
       - name: Build u-boot
         run: |
-          cd project/u-boot
+          # 自动检测 u-boot 目录
+          UBOOT_DIR=$(find project -type d -name u-boot | head -n 1)
+          if [ -z "$UBOOT_DIR" ]; then
+            echo "u-boot directory not found!"
+            exit 1
+          fi
+          cd $UBOOT_DIR
           export CROSS_COMPILE=arm-linux-gnueabi-
           make rk3399_defconfig
           make -j$(nproc)
 
       - name: Build image
         run: |
-          cd project
+          cd project/friendlywrt
           [ "${{ matrix.SET }}" = "docker" ] && SUFFIX="-docker" || SUFFIX=""
           FILENAME=NanoPi-M4-FriendlyWrt-24.10${SUFFIX}.img
           echo "TARGET_IMAGE_DIRNAME=friendlywrt24${SUFFIX}" > .current_config.mk
           echo "TARGET_FRIENDLYWRT_CONFIG=rockchip${SUFFIX}" >> .current_config.mk
           echo "TARGET_SD_RAW_FILENAME=$FILENAME" >> .current_config.mk
+          # 确认 build.sh 存在
+          if [ ! -f ./build.sh ]; then
+            echo "build.sh not found!"
+            exit 1
+          fi
           ./build.sh sd-img
+          if [ ! -f out/$FILENAME ]; then
+            echo "SD image not generated!"
+            exit 1
+          fi
           mv out/$FILENAME ../artifact/
           cd ../artifact
           gzip -9 $FILENAME
