@@ -1,4 +1,4 @@
-name: Build FriendlyWrt for NanoPi-M4
+name: Build FriendlyWrt for NanoPi M4
 
 on:
   workflow_dispatch:
@@ -6,70 +6,54 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential flex bison gawk \
-            libncurses5-dev libncursesw5-dev zlib1g-dev \
-            git gettext libssl-dev xsltproc zip unzip \
-            qemu-utils genisoimage python3 wget curl
+          sudo apt-get install -y \
+            build-essential flex bison gawk gcc-multilib g++-multilib \
+            gettext libncurses5-dev libssl-dev python3-distutils \
+            rsync unzip file wget git
 
       - name: Clone FriendlyWrt
         run: |
-          git clone --depth=1 https://github.com/friendlyarm/friendlywrt.git friendlywrt
+          git clone https://github.com/friendlyarm/friendlywrt.git friendlywrt
           cd friendlywrt
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          ls -l
 
-      - name: Add Extra Packages (SSR Plus / Passwall)
-        run: |
-          cd friendlywrt/package
-          # SSR Plus
-          git clone https://github.com/fw876/helloworld.git
-          # Passwall
-          git clone https://github.com/xiaorouji/openwrt-passwall.git
-          git clone https://github.com/xiaorouji/openwrt-passwall2.git
-          cd ../
-
-      - name: Configure Build
+      - name: Build NanoPi M4 Image
         run: |
           cd friendlywrt
-          rm -f .config
-          # 生成默认配置（NanoPi M4）
           make distclean
           ./build.sh nanopi_m4.mk
 
-          # 添加 SSR Plus + Passwall
+          # 添加 SSR Plus + Passwall + Docker
           cat >> .config <<EOF
           CONFIG_PACKAGE_luci-app-ssr-plus=y
           CONFIG_PACKAGE_luci-app-passwall=y
-          CONFIG_PACKAGE_luci-app-passwall2=y
           CONFIG_PACKAGE_luci-compat=y
           CONFIG_PACKAGE_luci-lib-ipkg=y
           CONFIG_PACKAGE_ipset=y
           CONFIG_PACKAGE_ip-full=y
+
+          # Docker 支持
+          CONFIG_PACKAGE_docker=y
+          CONFIG_PACKAGE_dockerd=y
+          CONFIG_PACKAGE_luci-app-dockerman=y
+          CONFIG_PACKAGE_luci-lib-docker=y
           EOF
 
           make defconfig
+          make -j$(nproc)
 
-      - name: Compile
-        run: |
-          cd friendlywrt
-          make -j$(nproc) || make -j1 V=s
-
-      - name: Package SD Image
-        run: |
-          cd friendlywrt
-          ls -lh bin/targets/rockchip/*
-          mkdir -p ../artifact
-          cp -v bin/targets/rockchip/*/*.img.gz ../artifact/ || true
-
-      - name: Upload Artifact
+      - name: Upload SD Image
         uses: actions/upload-artifact@v4
         with:
-          name: NanoPi-M4-SD-Image
-          path: artifact
+          name: NanoPi-M4-FriendlyWrt
+          path: |
+            friendlywrt/out/*.img*
+            friendlywrt/bin/targets/**/*.img*
