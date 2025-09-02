@@ -1,0 +1,129 @@
+name: Build FriendlyWrt for NanoPi M4 (passwall + Release)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  prepare_release:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Set release tag
+        id: release_tag
+        run: |
+          release_tag="NanoPiM4-Passwall-24.10-$(date +%Y-%m-%d)"
+          echo "##[set-output name=tag;]$release_tag"
+
+      - name: Create release
+        id: release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.release_tag.outputs.tag }}
+          name: ${{ steps.release_tag.outputs.tag }}
+          draft: false
+          prerelease: false
+
+    outputs:
+      release_tag: ${{ steps.release_tag.outputs.tag }}
+      upload_url: ${{ steps.release.outputs.upload_url }}
+
+  build:
+    needs: prepare_release
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        SET: [docker, non-docker]
+
+    steps:
+      # 1️⃣ Checkout
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # 2️⃣ 初始化环境
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git wget build-essential python3 unzip rsync
+          git clone https://github.com/friendlyarm/repo
+          sudo cp repo/repo /usr/bin/
+          mkdir -p artifact
+
+      # 3️⃣ 下载 FriendlyWrt 源码
+      - name: Download source (rk3399, v24.10)
+        run: |
+          mkdir project && cd project
+          repo init --depth=1 -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v24.10 \
+                   -m rk3399.xml --repo-url=https://github.com/friendlyarm/repo --no-clone-bundle
+          repo sync -c friendlywrt --no-clone-bundle
+          repo sync -c kernel --no-clone-bundle
+          repo sync -c u-boot --no-clone-bundle
+          repo sync -c rkbin --no-clone-bundle
+          repo sync -c configs --no-clone-bundle
+          repo sync -c device/common --no-clone-bundle
+          repo sync -c device/friendlyelec --no-clone-bundle
+          repo sync -c scripts --no-clone-bundle
+          repo sync -c scripts/sd-fuse --no-clone-bundle
+          repo sync -c toolchain --no-clone-bundle
+
+      # 4️⃣ 配置 feeds（passwall）
+      - name: Configure feeds
+        run: |
+          cd project/friendlywrt
+          cat > feeds.conf.default <<EOF
+src-git packages https://github.com/openwrt/packages
+src-git luci https://github.com/openwrt/luci
+src-git routing https://github.com/openwrt/routing
+src-git telephony https://github.com/openwrt/telephony
+src-git passwall_packages https://github.com/xiaorouji/openwrt-passwall-packages
+src-git passwall https://github.com/xiaorouji/openwrt-passwall
+EOF
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      # 5️⃣ 准备最小 .config
+      - name: Prepare minimal config with passwall
+        run: |
+          cd project/friendlywrt
+          cat > .config <<EOF
+CONFIG_TARGET_arm_cortex-a53=y
+CONFIG_TARGET_DEVICE_friendlyarm_nanopi-m4=y
+CONFIG_PACKAGE_luci=y
+CONFIG_PACKAGE_luci-compat=y
+CONFIG_PACKAGE_luci-base=y
+CONFIG_PACKAGE_luci-mod-admin-full=y
+CONFIG_PACKAGE_luci-theme-bootstrap=y
+CONFIG_PACKAGE_luci-app-passwall=y
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks=y
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Simple_Obfs=y
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Trojan=y
+EOF
+          make defconfig
+
+      # 6️⃣ 编译 rootfs & SD 镜像
+      - name: Build rootfs & SD image
+        run: |
+          cd project/friendlywrt
+          make download -j$(nproc)
+          make -j$(nproc) || make -j1 V=s
+
+          # 设置 docker / non-docker
+          [ "${{ matrix.SET }}" = "docker" ] && SUFFIX="-docker" || SUFFIX=""
+          FILENAME=NanoPi-M4-FriendlyWrt-24.10${SUFFIX}.img
+          echo "TARGET_IMAGE_DIRNAME=friendlywrt24${SUFFIX}" > .current_config.mk
+          echo "TARGET_FRIENDLYWRT_CONFIG=rockchip${SUFFIX}" >> .current_config.mk
+          echo "TARGET_SD_RAW_FILENAME=$FILENAME" >> .current_config.mk
+          ./build.sh sd-img
+          mv out/$FILENAME ../artifact/
+          cd ../artifact
+          gzip -9 $FILENAME
+
+      # 7️⃣ 上传到 Release
+      - name: Upload SD image to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ./artifact/*.img.gz
+          asset_name: ${{ matrix.SET }}-NanoPi-M4-FriendlyWrt-24.10.img.gz
+          tag: ${{ needs.prepare_release.outputs.release_tag }}
+          overwrite: true
