@@ -1,4 +1,4 @@
-name: Build FriendlyWrt for NanoPi M4
+name: NanoPi M4
 
 on:
   workflow_dispatch:
@@ -18,41 +18,72 @@ jobs:
       - name: Init build env
         run: |
           sudo apt-get update
-          sudo apt-get install -y git wget build-essential python3 unzip rsync
+          sudo apt-get install -y git wget build-essential python3 unzip rsync ccache
           git clone https://github.com/friendlyarm/repo
           sudo cp repo/repo /usr/bin/
-          mkdir -p artifact
+          mkdir -p artifact project/friendlywrt
+
+      - name: Cache downloads and host build
+        uses: actions/cache@v3
+        with:
+          path: |
+            project/friendlywrt/dl
+            project/friendlywrt/build_dir/host
+          key: friendlywrt-dl-build
+          restore-keys: friendlywrt-dl-build
 
       - name: Download source (rk3399, v24.10)
         run: |
-          mkdir project && cd project
+          mkdir -p project && cd project
           repo init --depth=1 -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v24.10 \
                    -m rk3399.xml --repo-url=https://github.com/friendlyarm/repo --no-clone-bundle
+          # 只同步必要 repo，提高效率
           repo sync -c friendlywrt --no-clone-bundle
           repo sync -c kernel --no-clone-bundle
           repo sync -c u-boot --no-clone-bundle
-          repo sync -c rkbin --no-clone-bundle
-          repo sync -c configs --no-clone-bundle
-          repo sync -c device/common --no-clone-bundle
-          repo sync -c device/friendlyelec --no-clone-bundle
-          repo sync -c scripts --no-clone-bundle
-          repo sync -c scripts/sd-fuse --no-clone-bundle
           repo sync -c toolchain --no-clone-bundle
+          repo sync -c device/friendlyelec --no-clone-bundle
 
-      - name: Add SSR Plus+
+      - name: Add Passwall
         run: |
           cd project/friendlywrt
-          echo 'src-git helloworld https://github.com/fw876/helloworld' >> feeds.conf.default
-          ./scripts/feeds update helloworld
-          ./scripts/feeds install luci-app-ssr-plus
-          echo "CONFIG_PACKAGE_luci-app-ssr-plus=y" >> .config
+          echo 'src-git passwall https://github.com/xiaorouji/openwrt-passwall' >> feeds.conf.default
+          ./scripts/feeds update passwall
+          ./scripts/feeds install luci-app-passwall luci-i18n-passwall-zh-cn
+          echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y" >> .config
           make defconfig
+
+      - name: Add default Passwall config
+        run: |
+          cd project/friendlywrt
+          mkdir -p files/etc/config
+          cat > files/etc/config/passwall << 'EOF'
+config global
+	option enabled '1'
+
+config server 'example'
+	option name 'MyServer'
+	option type 'ss'
+	option server '1.2.3.4'
+	option port '8388'
+	option password 'password'
+	option encrypt_method 'aes-256-gcm'
+EOF
+          echo "Passwall default config added."
 
       - name: Build rootfs
         run: |
           cd project/friendlywrt
           make download -j$(nproc)
           make -j$(nproc) || make -j1 V=s
+
+      - name: Build u-boot
+        run: |
+          cd project/u-boot
+          export CROSS_COMPILE=arm-linux-gnueabi-
+          make rk3399_defconfig
+          make -j$(nproc)
 
       - name: Build image
         run: |
