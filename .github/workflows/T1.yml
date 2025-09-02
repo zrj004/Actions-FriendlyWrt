@@ -1,4 +1,4 @@
-name: Build FriendlyWrt SD Image
+name: Build FriendlyWrt for NanoPi-M4
 
 on:
   workflow_dispatch:
@@ -6,48 +6,70 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git wget build-essential python3 unzip rsync ccache \
-            parted dosfstools e2fsprogs fdisk kmod
+          sudo apt-get install -y build-essential flex bison gawk \
+            libncurses5-dev libncursesw5-dev zlib1g-dev \
+            git gettext libssl-dev xsltproc zip unzip \
+            qemu-utils genisoimage python3 wget curl
 
       - name: Clone FriendlyWrt
         run: |
-          git clone --depth=1 https://github.com/friendlyarm/friendlywrt project/friendlywrt
+          git clone --depth=1 https://github.com/friendlyarm/friendlywrt.git friendlywrt
+          cd friendlywrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
 
-      - name: Prepare config
+      - name: Add Extra Packages (SSR Plus / Passwall)
         run: |
-          cd project/friendlywrt
-          cp configs/config_nanopi_m4_defconfig .config
-          # 强制启用 SD 镜像选项
-          echo "CONFIG_TARGET_IMAGES=y" >> .config
-          echo "CONFIG_TARGET_IMAGE_SD=y" >> .config
+          cd friendlywrt/package
+          # SSR Plus
+          git clone https://github.com/fw876/helloworld.git
+          # Passwall
+          git clone https://github.com/xiaorouji/openwrt-passwall.git
+          git clone https://github.com/xiaorouji/openwrt-passwall2.git
+          cd ../
+
+      - name: Configure Build
+        run: |
+          cd friendlywrt
+          rm -f .config
+          # 生成默认配置（NanoPi M4）
+          make distclean
+          ./build.sh nanopi_m4.mk
+
+          # 添加 SSR Plus + Passwall
+          cat >> .config <<EOF
+          CONFIG_PACKAGE_luci-app-ssr-plus=y
+          CONFIG_PACKAGE_luci-app-passwall=y
+          CONFIG_PACKAGE_luci-app-passwall2=y
+          CONFIG_PACKAGE_luci-compat=y
+          CONFIG_PACKAGE_luci-lib-ipkg=y
+          CONFIG_PACKAGE_ipset=y
+          CONFIG_PACKAGE_ip-full=y
+          EOF
+
           make defconfig
 
-      - name: Build
+      - name: Compile
         run: |
-          cd project/friendlywrt
+          cd friendlywrt
           make -j$(nproc) || make -j1 V=s
 
-      - name: Find SD Image
+      - name: Package SD Image
         run: |
-          cd project/friendlywrt
-          IMG_PATH=$(find bin/targets/rockchip/ -type f -name "*-sdcard.img" | head -n1 || true)
-          if [ -z "$IMG_PATH" ]; then
-            echo "❌ No SD image found!"
-            ls -R bin/targets || true
-            exit 1
-          fi
-          echo "IMG_PATH=$IMG_PATH" >> $GITHUB_ENV
+          cd friendlywrt
+          ls -lh bin/targets/rockchip/*
+          mkdir -p ../artifact
+          cp -v bin/targets/rockchip/*/*.img.gz ../artifact/ || true
 
-      - name: Upload SD Image
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: FriendlyWrt-SDImage
-          path: ${{ env.IMG_PATH }}
+          name: NanoPi-M4-SD-Image
+          path: artifact
