@@ -1,4 +1,4 @@
-name: Build FriendlyWrt NanoPi M4 Lite (Stable + Clean)
+name: Build FriendlyWrt NanoPi M4 Lite (Auto Threads)
 
 on:
   workflow_dispatch:
@@ -75,25 +75,36 @@ jobs:
 
           make defconfig
 
-      - name: Compile host tools (single thread)
+      - name: Detect CPU cores and set jobs
+        id: detect
         run: |
-          cd friendlywrt
-          make -j1 V=s tools/compile
+          NPROC=$(nproc)
+          if [ "$NPROC" -gt 2 ]; then
+            JOBS=2
+          else
+            JOBS=$NPROC
+          fi
+          echo "JOBS=$JOBS" >> $GITHUB_ENV
 
-      - name: Compile target/linux (single thread)
+      - name: Compile host tools
         run: |
           cd friendlywrt
-          make -j1 V=s target/compile
+          make -j$JOBS V=s tools/compile
 
-      - name: Compile packages (single thread)
+      - name: Compile target/linux
         run: |
           cd friendlywrt
-          make -j1 V=s package/compile
+          make -j$JOBS V=s target/compile
 
-      - name: Build full firmware image (single thread)
+      - name: Compile packages
         run: |
           cd friendlywrt
-          make -j1 V=s
+          make -j$JOBS V=s package/compile
+
+      - name: Build full firmware image
+        run: |
+          cd friendlywrt
+          make -j$JOBS V=s
 
       - name: Upload SD Image
         uses: actions/upload-artifact@v4
