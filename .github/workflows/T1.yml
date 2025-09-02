@@ -11,9 +11,40 @@ jobs:
     - name: Checkout source
       uses: actions/checkout@v3
 
-    - name: Build Docker image for FriendlyWrt
+    - name: Create Dockerfile
       run: |
-        docker build -t friendlywrt-builder -f Dockerfile .
+        cat > Dockerfile <<'EOF'
+        FROM ubuntu:22.04
+        ENV DEBIAN_FRONTEND=noninteractive
+        RUN apt-get update && apt-get install -y \
+            build-essential git wget flex bison gawk gcc-multilib g++-multilib gettext \
+            libncurses5-dev libssl-dev python3-distutils python3-setuptools python3-pip \
+            python3-pyelftools m4 automake autoconf unzip rsync file curl sudo ca-certificates \
+            && rm -rf /var/lib/apt/lists/*
+        WORKDIR /work
+        RUN git clone --depth=1 -b master-v24.10 https://github.com/friendlyarm/friendlywrt.git friendlywrt
+        ENV PATH=/work/friendlywrt/staging_dir/host/bin:$PATH
+        ENV JOBS=4
+        RUN mkdir -p /work/friendlywrt/downloads /work/friendlywrt/build_dir/host /work/artifact
+        WORKDIR /work/friendlywrt
+        RUN cp configs/nanopi_m4_defconfig .config && \
+            cat >> .config <<'CFG'
+        CONFIG_PACKAGE_luci-app-ssr-plus=y
+        CONFIG_PACKAGE_luci-app-passwall=y
+        CONFIG_PACKAGE_luci-compat=y
+        CONFIG_PACKAGE_luci-lib-ipkg=y
+        CONFIG_PACKAGE_ipset=y
+        CONFIG_PACKAGE_ip-full=y
+        CONFIG_PACKAGE_docker=y
+        CONFIG_PACKAGE_dockerd=y
+        CONFIG_PACKAGE_luci-app-dockerman=y
+        CONFIG_PACKAGE_luci-lib-docker=y
+        CFG
+        RUN make defconfig
+        EOF
+
+    - name: Build Docker image
+      run: docker build -t friendlywrt-builder -f Dockerfile .
 
     - name: Create artifact directory
       run: mkdir -p artifact
