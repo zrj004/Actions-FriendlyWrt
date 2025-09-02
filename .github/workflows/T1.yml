@@ -13,7 +13,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@main
+        uses: actions/checkout@v3
 
       - name: Init build env
         run: |
@@ -62,15 +62,15 @@ jobs:
 
       - name: Build image
         run: |
-          cd project
+          cd project/friendlywrt
           [ "${{ matrix.SET }}" = "docker" ] && SUFFIX="-docker" || SUFFIX=""
           FILENAME=NanoPi-M4-FriendlyWrt-24.10${SUFFIX}.img
           echo "TARGET_IMAGE_DIRNAME=friendlywrt24${SUFFIX}" > .current_config.mk
           echo "TARGET_FRIENDLYWRT_CONFIG=rockchip${SUFFIX}" >> .current_config.mk
           echo "TARGET_SD_RAW_FILENAME=$FILENAME" >> .current_config.mk
           ./build.sh sd-img
-          mv out/$FILENAME ../artifact/
-          cd ../artifact
+          mv out/$FILENAME ../../artifact/
+          cd ../../artifact
           gzip -9 $FILENAME
 
       - name: Upload artifact
