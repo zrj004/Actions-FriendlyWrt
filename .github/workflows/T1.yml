@@ -52,8 +52,8 @@ EOF
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # 5️⃣ Prepare minimal .config with Passwall
-      - name: Prepare .config
+      # 5️⃣ Prepare .config (Passwall + LuCI)
+      - name: Prepare minimal config
         run: |
           cd project/friendlywrt
           grep -q 'CONFIG_PACKAGE_luci-app-passwall' .config || cat >> .config <<EOF
