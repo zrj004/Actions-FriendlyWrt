@@ -63,12 +63,13 @@ jobs:
           repo sync -c scripts --no-clone-bundle
           repo sync -c toolchain --no-clone-bundle
 
-      - name: Add SSR Plus+
-        run: |
-          cd project
-          mkdir -p package/custom
-          cd package/custom
-          git clone --depth=1 https://github.com/ophub/luci-app-ssr-plus.git
+     - name: Add luci-app-ssr-plus
+       run: |
+         cd project/package/custom
+         git clone --depth=1 https://github.com/fw876/helloworld.git
+         mv helloworld/luci-app-ssr-plus ./
+         rm -rf helloworld
+
 
       - name: Prepare configs
         run: |
