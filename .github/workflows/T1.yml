@@ -1,93 +1,53 @@
-name: Build FriendlyWrt NanoPi M4
+name: Build FriendlyWrt for NanoPi M4
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout Actions-FriendlyWrt repo
         uses: actions/checkout@v3
 
-      - name: Prepare artifact directory
-        run: mkdir -p artifact
-
-      - name: Build Docker image
+      - name: Set up build environment
         run: |
-          cat <<'EOF' > Dockerfile
-          FROM ubuntu:22.04
-          ENV DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            git build-essential subversion libncurses5-dev zlib1g-dev \
+            gawk gcc-multilib flex gettext wget unzip python3 python3-distutils ccache \
+            ca-certificates
+          # 设置线程数
+          echo "export MAKEFLAGS=-j4" >> $GITHUB_ENV
 
-          # 安装编译依赖
-          RUN apt-get update && apt-get install -y \
-              build-essential git wget flex bison gawk gcc-multilib g++-multilib gettext \
-              libncurses5-dev libssl-dev python3-distutils python3-setuptools python3-pip \
-              python3-pyelftools m4 automake autoconf unzip rsync file curl ca-certificates \
-              && rm -rf /var/lib/apt/lists/*
-
-          WORKDIR /work
-          EOF
-
-          docker build -t friendlywrt-builder .
-
-      - name: Compile FriendlyWrt inside Docker
+      - name: Clone FriendlyWrt source
         run: |
-          docker run --rm \
-            -v ${{ github.workspace }}/artifact:/work/artifact \
-            friendlywrt-builder \
-            bash -c "
-              set -e
-              cd /work
+          rm -rf friendlywrt
+          git clone --depth 1 https://github.com/friendlyarm/friendlywrt.git
 
-              # 克隆源码
-              git clone --depth=1 -b master-v24.10 https://github.com/friendlyarm/friendlywrt.git friendlywrt
-              cd friendlywrt
+      - name: Compile FriendlyWrt
+        run: |
+          cd friendlywrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
 
-              # 初始化 feeds
-              ./scripts/feeds update -a
-              ./scripts/feeds install -a
+          # 自动修改 .config，启用 NanoPi M4 + SSR Plus + Passwall
+          cp defconfig .config
+          sed -i 's/# CONFIG_PACKAGE_luci-app-ssr-plus is not set/CONFIG_PACKAGE_luci-app-ssr-plus=y/' .config
+          sed -i 's/# CONFIG_PACKAGE_luci-app-passwall is not set/CONFIG_PACKAGE_luci-app-passwall=y/' .config
 
-              # 精简配置：NanoPi M4 + SSR Plus + Passwall + Docker
-              cat > .config <<'CFG'
-CONFIG_TARGET_rockchip=y
-CONFIG_TARGET_rockchip_armv8=y
-CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-m4=y
-CONFIG_PACKAGE_luci=y
-CONFIG_PACKAGE_luci-compat=y
-CONFIG_PACKAGE_luci-lib-ipkg=y
-CONFIG_PACKAGE_ipset=y
-CONFIG_PACKAGE_ip-full=y
-CONFIG_PACKAGE_luci-app-ssr-plus=y
-CONFIG_PACKAGE_luci-app-passwall=y
-CONFIG_PACKAGE_docker=y
-CONFIG_PACKAGE_dockerd=y
-CONFIG_PACKAGE_luci-app-dockerman=y
-CONFIG_PACKAGE_luci-lib-docker=y
-CFG
+          make defconfig
+          make
 
-              make defconfig
+          mkdir -p ../artifact
+          cp bin/targets/sunxi/rockchip/*.img.gz ../artifact/
 
-              # 编译工具链
-              echo '编译 host 工具链'
-              make tools/compile -j$(nproc)
-
-              # 编译 target + 插件 (最多 4 线程)
-              echo '编译 target + 插件'
-              NPROC=$(nproc)
-              if [ $NPROC -gt 4 ]; then JOBS=4; else JOBS=$NPROC; fi
-              make -j$JOBS V=sc
-
-              # 打包 SD 镜像
-              IMG_NAME=NanoPi-M4-FriendlyWrt-24.10.img
-              mkdir -p /work/artifact
-              mv bin/targets/rockchip/armv8/$IMG_NAME /work/artifact/ || true
-              cd /work/artifact && gzip -9 $IMG_NAME || true
-            "
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload SD card image artifact
+        uses: actions/upload-artifact@v3
         with:
-          name: NanoPi-M4-images
+          name: friendlywrt-nanopi-m4
           path: artifact/*.img.gz
