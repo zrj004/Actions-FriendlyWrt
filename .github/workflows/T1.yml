@@ -1,4 +1,4 @@
-name: Build FriendlyWrt NanoPi M4 Lite (Optimized Logs)
+name: Build FriendlyWrt NanoPi M4 Lite + Docker (Fast + Incremental)
 
 on:
   workflow_dispatch:
@@ -24,53 +24,42 @@ jobs:
           python3 -m pip install pyelftools
 
       - name: Clone FriendlyWrt
-        run: |
-          git clone https://github.com/friendlyarm/friendlywrt.git friendlywrt
-          cd friendlywrt
-          ls -l
+        run: git clone https://github.com/friendlyarm/friendlywrt.git friendlywrt
 
-      - name: Clean previous build
+      - name: Restore build cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            friendlywrt/staging_dir
+            friendlywrt/downloads
+            friendlywrt/build_dir/host
+          key: friendlywrt-build-cache
+          restore-keys: friendlywrt-build-cache
+
+      - name: Prepare config for NanoPi M4 Lite + Docker
         run: |
           cd friendlywrt
-          make distclean
-          rm -rf staging_dir build_dir
-
-      - name: Prepare config for NanoPi M4 Lite
-        run: |
-          cd friendlywrt
-
-          # 初始化 feeds
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # 精简配置，只保留 SSR Plus、Passwall、Docker
           cat > .config <<EOF
           CONFIG_TARGET_rockchip=y
           CONFIG_TARGET_rockchip_armv8=y
           CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-m4=y
 
-          # 基础功能
           CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_luci-compat=y
           CONFIG_PACKAGE_luci-lib-ipkg=y
           CONFIG_PACKAGE_ipset=y
           CONFIG_PACKAGE_ip-full=y
 
-          # 插件
           CONFIG_PACKAGE_luci-app-ssr-plus=y
           CONFIG_PACKAGE_luci-app-passwall=y
 
-          # Docker
           CONFIG_PACKAGE_docker=y
           CONFIG_PACKAGE_dockerd=y
           CONFIG_PACKAGE_luci-app-dockerman=y
           CONFIG_PACKAGE_luci-lib-docker=y
-
-          # 关闭不必要模块
-          #CONFIG_PACKAGE_ppp=n
-          #CONFIG_PACKAGE_pppoe=n
-          #CONFIG_PACKAGE_samba4-server=n
-          #CONFIG_PACKAGE_wpad-basic=n
           EOF
 
           make defconfig
@@ -86,30 +75,39 @@ jobs:
           fi
           echo "JOBS=$JOBS" >> $GITHUB_ENV
 
-      - name: Compile host tools (optimized logs)
+      - name: Compile host tools (cross compiler)
         run: |
           cd friendlywrt
           make -j$JOBS V=sc tools/compile
 
-      - name: Compile target/linux (optimized logs)
+      - name: Compile target/linux
         run: |
           cd friendlywrt
           make -j$JOBS V=sc target/compile
 
-      - name: Compile packages (optimized logs)
+      - name: Compile packages
         run: |
           cd friendlywrt
           make -j$JOBS V=sc package/compile
 
-      - name: Build full firmware image (optimized logs)
+      - name: Build firmware image
         run: |
           cd friendlywrt
           make -j$JOBS V=sc
 
+      - name: Save cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            friendlywrt/staging_dir
+            friendlywrt/downloads
+            friendlywrt/build_dir/host
+          key: friendlywrt-build-cache
+
       - name: Upload SD Image
         uses: actions/upload-artifact@v4
         with:
-          name: NanoPi-M4-FriendlyWrt-Lite
+          name: NanoPi-M4-FriendlyWrt-Lite-Docker
           path: |
             friendlywrt/bin/targets/rockchip/armv8/*.img*
             friendlywrt/bin/targets/rockchip/armv8/*.img*.gz
