@@ -17,7 +17,12 @@ jobs:
           sudo apt-get install -y \
             build-essential flex bison gawk gcc-multilib g++-multilib \
             gettext libncurses5-dev libssl-dev python3-distutils \
-            python3-setuptools rsync unzip file wget git curl
+            python3-setuptools python3-pip python3-pyelftools \
+            rsync unzip file wget git curl
+
+          # 升级 pip 并确保 pyelftools 可用
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pyelftools
 
       - name: Clone FriendlyWrt
         run: |
@@ -25,7 +30,7 @@ jobs:
           cd friendlywrt
           ls -l
 
-      - name: Build NanoPi M4 Lite Image (OpenWrt standard)
+      - name: Build NanoPi M4 Lite Image
         run: |
           cd friendlywrt
 
@@ -36,7 +41,7 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # 生成精简配置
+          # 精简配置，只保留 SSR Plus、Passwall、Docker
           cat > .config <<EOF
           CONFIG_TARGET_rockchip=y
           CONFIG_TARGET_rockchip_armv8=y
