@@ -65,32 +65,22 @@ jobs:
           echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y" >> .config
           make defconfig
 
-      - name: Build rootfs (incremental)
+      - name: Build rootfs and SD image (incremental)
         if: steps.check_image.outputs.skip_build == 'false'
         run: |
           cd project/friendlywrt
           make download -j$(nproc)
           make -j$(nproc) || make -j1 V=s
 
-      - name: Build SD image
-        if: steps.check_image.outputs.skip_build == 'false'
-        run: |
-          cd project/friendlywrt
-          [ "${{ matrix.SET }}" = "docker" ] && SUFFIX="-docker" || SUFFIX=""
-          
-          # 使用官方 SD 镜像目标
-          make -j$(nproc) || make -j1 V=s
-          make sdimg -j$(nproc) || make sdimg -j1 V=s
-
           mkdir -p ../../artifact
-          # 查找生成的 SD 镜像（兼容不同子目录）
+          # 查找生成的 SD 镜像
           IMG_PATH=$(find bin/targets/rockchip/ -name "*-sdcard.img" | head -n1)
           if [ -z "$IMG_PATH" ]; then
             echo "Error: SD image not found"
             exit 1
           fi
-
           # 移动并重命名镜像
+          [ "${{ matrix.SET }}" = "docker" ] && SUFFIX="-docker" || SUFFIX=""
           mv "$IMG_PATH" ../../artifact/NanoPi-M4-FriendlyWrt-24.10${SUFFIX}.img
           cd ../../artifact
           gzip -9 NanoPi-M4-FriendlyWrt-24.10${SUFFIX}.img
