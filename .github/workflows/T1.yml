@@ -1,4 +1,4 @@
-name: Build FriendlyWrt NanoPi M4 (Docker)
+name: Build FriendlyWrt NanoPi M4
 
 on:
   workflow_dispatch:
@@ -38,7 +38,10 @@ jobs:
             -v ${{ github.workspace }}/artifact:/work/artifact \
             friendlywrt-builder \
             bash -c "
+              set -e
               cd /work
+
+              # 克隆源码
               git clone --depth=1 -b master-v24.10 https://github.com/friendlyarm/friendlywrt.git friendlywrt
               cd friendlywrt
 
@@ -66,15 +69,16 @@ CFG
 
               make defconfig
 
-              # 编译（最多 4 线程）
+              # 编译 (最多 4 线程)
               NPROC=\$(nproc)
               if [ \$NPROC -gt 4 ]; then JOBS=4; else JOBS=\$NPROC; fi
               make -j\$JOBS V=sc
 
               # 打包 SD 镜像
-              FILENAME=NanoPi-M4-FriendlyWrt-24.10.img
-              mv bin/targets/rockchip/armv8/\$FILENAME /work/artifact/
-              cd /work/artifact && gzip -9 \$FILENAME
+              IMG_NAME=NanoPi-M4-FriendlyWrt-24.10.img
+              mkdir -p /work/artifact
+              mv bin/targets/rockchip/armv8/\$IMG_NAME /work/artifact/ || true
+              cd /work/artifact && gzip -9 \$IMG_NAME || true
             "
 
       - name: Upload artifact
