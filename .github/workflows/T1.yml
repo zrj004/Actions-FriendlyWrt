@@ -69,16 +69,21 @@ CFG
 
               make defconfig
 
-              # 编译 (最多 4 线程)
-              NPROC=\$(nproc)
-              if [ \$NPROC -gt 4 ]; then JOBS=4; else JOBS=\$NPROC; fi
-              make -j\$JOBS V=sc
+              # 编译工具链
+              echo '编译 host 工具链'
+              make tools/compile -j$(nproc)
+
+              # 编译 target + 插件 (最多 4 线程)
+              echo '编译 target + 插件'
+              NPROC=$(nproc)
+              if [ $NPROC -gt 4 ]; then JOBS=4; else JOBS=$NPROC; fi
+              make -j$JOBS V=sc
 
               # 打包 SD 镜像
               IMG_NAME=NanoPi-M4-FriendlyWrt-24.10.img
               mkdir -p /work/artifact
-              mv bin/targets/rockchip/armv8/\$IMG_NAME /work/artifact/ || true
-              cd /work/artifact && gzip -9 \$IMG_NAME || true
+              mv bin/targets/rockchip/armv8/$IMG_NAME /work/artifact/ || true
+              cd /work/artifact && gzip -9 $IMG_NAME || true
             "
 
       - name: Upload artifact
