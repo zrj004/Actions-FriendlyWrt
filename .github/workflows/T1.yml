@@ -37,7 +37,6 @@ jobs:
           [ "${{ matrix.SET }}" = "docker" ] && SUFFIX="-docker" || SUFFIX=""
           FILENAME=NanoPi-M4-FriendlyWrt-24.10${SUFFIX}.img.gz
           if [ -f artifact/$FILENAME ]; then
-            echo "Image $FILENAME already exists, skipping build."
             echo "skip_build=true" >> $GITHUB_OUTPUT
           else
             echo "skip_build=false" >> $GITHUB_OUTPUT
@@ -78,22 +77,23 @@ jobs:
         run: |
           cd project/friendlywrt
           [ "${{ matrix.SET }}" = "docker" ] && SUFFIX="-docker" || SUFFIX=""
-          FILENAME=NanoPi-M4-FriendlyWrt-24.10${SUFFIX}.img
           
-          echo "CONFIG_TARGET_IMAGE_NAME=$FILENAME" >> .config
-          echo "CONFIG_TARGET_IMAGE_SD=y" >> .config
-          make defconfig
+          # 使用官方 SD 镜像目标
           make -j$(nproc) || make -j1 V=s
+          make sdimg -j$(nproc) || make sdimg -j1 V=s
 
           mkdir -p ../../artifact
-          IMG_PATH=$(find bin/targets/rockchip/ -name "$FILENAME" | head -n1)
+          # 查找生成的 SD 镜像（兼容不同子目录）
+          IMG_PATH=$(find bin/targets/rockchip/ -name "*-sdcard.img" | head -n1)
           if [ -z "$IMG_PATH" ]; then
             echo "Error: SD image not found"
             exit 1
           fi
-          mv "$IMG_PATH" ../../artifact/
+
+          # 移动并重命名镜像
+          mv "$IMG_PATH" ../../artifact/NanoPi-M4-FriendlyWrt-24.10${SUFFIX}.img
           cd ../../artifact
-          gzip -9 $FILENAME
+          gzip -9 NanoPi-M4-FriendlyWrt-24.10${SUFFIX}.img
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
