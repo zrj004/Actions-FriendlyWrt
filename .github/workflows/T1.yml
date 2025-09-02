@@ -1,4 +1,4 @@
-name: Build FriendlyWrt NanoPi M4 Lite + Docker (Fast + Incremental)
+name: Build FriendlyWrt NanoPi M4
 
 on:
   workflow_dispatch:
@@ -8,106 +8,83 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - name: Checkout source
+      uses: actions/checkout@v3
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential flex bison gawk gcc-multilib g++-multilib \
-            gettext libncurses5-dev libssl-dev python3-distutils \
-            python3-setuptools python3-pip python3-pyelftools \
-            m4 automake autoconf unzip rsync file wget git curl
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential git wget flex bison gawk gcc-multilib g++-multilib gettext \
+          libncurses5-dev libssl-dev python3-distutils python3-setuptools python3-pip \
+          python3-pyelftools m4 automake autoconf unzip rsync file curl
 
-          python3 -m pip install --upgrade pip
-          python3 -m pip install pyelftools
+    - name: Prepare directories
+      run: |
+        mkdir -p friendlywrt/downloads friendlywrt/build_dir/host friendlywrt/staging_dir artifact
 
-      - name: Clone FriendlyWrt
-        run: git clone https://github.com/friendlyarm/friendlywrt.git friendlywrt
+    - name: Cache build
+      uses: actions/cache@v3
+      with:
+        path: |
+          friendlywrt/staging_dir
+          friendlywrt/build_dir/host
+          friendlywrt/downloads
+        key: friendlywrt-build-cache
 
-      - name: Restore build cache
-        uses: actions/cache@v3
-        with:
-          path: |
-            friendlywrt/staging_dir
-            friendlywrt/downloads
-            friendlywrt/build_dir/host
-          key: friendlywrt-build-cache
-          restore-keys: friendlywrt-build-cache
+    - name: Init FriendlyWrt repo
+      run: |
+        cd friendlywrt
+        repo init --depth=1 -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v24.10
+        repo sync -c friendlywrt --no-clone-bundle
+        repo sync -c kernel --no-clone-bundle
+        repo sync -c u-boot --no-clone-bundle
+        repo sync -c toolchain --no-clone-bundle
+        repo sync -c device/friendlyelec --no-clone-bundle
 
-      - name: Prepare config for NanoPi M4 Lite + Docker
-        run: |
-          cd friendlywrt
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+    - name: Generate default config (NanoPi M4)
+      run: |
+        cd friendlywrt
+        make distclean || true
+        cp configs/nanopi_m4_defconfig .config
+        # 添加 SSR Plus + Passwall + Docker
+        cat >> .config <<EOF
+CONFIG_PACKAGE_luci-app-ssr-plus=y
+CONFIG_PACKAGE_luci-app-passwall=y
+CONFIG_PACKAGE_luci-compat=y
+CONFIG_PACKAGE_luci-lib-ipkg=y
+CONFIG_PACKAGE_ipset=y
+CONFIG_PACKAGE_ip-full=y
+CONFIG_PACKAGE_docker=y
+CONFIG_PACKAGE_dockerd=y
+CONFIG_PACKAGE_luci-app-dockerman=y
+CONFIG_PACKAGE_luci-lib-docker=y
+EOF
+        make defconfig
 
-          cat > .config <<EOF
-          CONFIG_TARGET_rockchip=y
-          CONFIG_TARGET_rockchip_armv8=y
-          CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-m4=y
+    - name: Compile host tools (incremental)
+      run: |
+        cd friendlywrt
+        make tools/compile -j$(nproc)
+        export PATH=$(pwd)/staging_dir/host/bin:$PATH
 
-          CONFIG_PACKAGE_luci=y
-          CONFIG_PACKAGE_luci-compat=y
-          CONFIG_PACKAGE_luci-lib-ipkg=y
-          CONFIG_PACKAGE_ipset=y
-          CONFIG_PACKAGE_ip-full=y
+    - name: Compile target (incremental)
+      run: |
+        cd friendlywrt
+        NPROC=$(nproc)
+        if [ "$NPROC" -gt 4 ]; then JOBS=4; else JOBS=$NPROC; fi
+        make -j$JOBS V=sc
 
-          CONFIG_PACKAGE_luci-app-ssr-plus=y
-          CONFIG_PACKAGE_luci-app-passwall=y
+    - name: Move artifact
+      run: |
+        cd friendlywrt
+        FILENAME=NanoPi-M4-FriendlyWrt-24.10.img
+        mv bin/targets/rockchip/armv8/$FILENAME ../artifact/ || true
+        cd ../artifact
+        gzip -9 $FILENAME || true
 
-          CONFIG_PACKAGE_docker=y
-          CONFIG_PACKAGE_dockerd=y
-          CONFIG_PACKAGE_luci-app-dockerman=y
-          CONFIG_PACKAGE_luci-lib-docker=y
-          EOF
-
-          make defconfig
-
-      - name: Detect CPU cores and set jobs
-        id: detect
-        run: |
-          NPROC=$(nproc)
-          if [ "$NPROC" -gt 2 ]; then
-            JOBS=2
-          else
-            JOBS=$NPROC
-          fi
-          echo "JOBS=$JOBS" >> $GITHUB_ENV
-
-      - name: Compile host tools (cross compiler)
-        run: |
-          cd friendlywrt
-          make -j$JOBS V=sc tools/compile
-
-      - name: Compile target/linux (kernel)
-        run: |
-          cd friendlywrt
-          make -j$JOBS V=sc target/compile
-
-      - name: Compile packages (SSR, Passwall, Docker)
-        run: |
-          cd friendlywrt
-          make -j$JOBS V=sc package/compile
-
-      - name: Build SD firmware image
-        run: |
-          cd friendlywrt
-          make -j$JOBS V=sc
-
-      - name: Save build cache
-        uses: actions/cache@v3
-        with:
-          path: |
-            friendlywrt/staging_dir
-            friendlywrt/downloads
-            friendlywrt/build_dir/host
-          key: friendlywrt-build-cache
-
-      - name: Upload SD Image
-        uses: actions/upload-artifact@v4
-        with:
-          name: NanoPi-M4-FriendlyWrt-Lite-Docker
-          path: |
-            friendlywrt/bin/targets/rockchip/armv8/*.img*
-            friendlywrt/bin/targets/rockchip/armv8/*.img*.gz
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: NanoPi-M4-images
+        path: artifact/*.img.gz
