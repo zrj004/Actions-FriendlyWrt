@@ -4,20 +4,19 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build_friendlywrt:
     runs-on: ubuntu-22.04
-
     strategy:
       matrix:
         SET: [docker, non-docker]
 
     steps:
-      # 1️⃣ Checkout 仓库
-      - name: Checkout repository
+      # 1️⃣ Checkout repository
+      - name: Checkout
         uses: actions/checkout@v3
 
-      # 2️⃣ 初始化编译环境
-      - name: Setup build environment
+      # 2️⃣ Setup build environment
+      - name: Init build env
         run: |
           sudo apt-get update
           sudo apt-get install -y git wget build-essential python3 unzip rsync
@@ -25,8 +24,8 @@ jobs:
           sudo cp repo/repo /usr/bin/
           mkdir -p artifact
 
-      # 3️⃣ 下载 FriendlyWrt 源码
-      - name: Download FriendlyWrt source
+      # 3️⃣ Download FriendlyWrt source
+      - name: Download source
         run: |
           mkdir project && cd project
           repo init --depth=1 -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v24.10 \
@@ -42,7 +41,7 @@ jobs:
           repo sync -c scripts/sd-fuse --no-clone-bundle
           repo sync -c toolchain --no-clone-bundle
 
-      # 4️⃣ 配置 Passwall feeds
+      # 4️⃣ Configure Passwall feeds
       - name: Configure Passwall feeds
         run: |
           cd project/friendlywrt
@@ -53,8 +52,8 @@ EOF
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # 5️⃣ 准备 .config（只选 Passwall + LuCI）
-      - name: Prepare minimal config with Passwall
+      # 5️⃣ Prepare minimal .config with Passwall
+      - name: Prepare .config
         run: |
           cd project/friendlywrt
           grep -q 'CONFIG_PACKAGE_luci-app-passwall' .config || cat >> .config <<EOF
@@ -72,14 +71,14 @@ CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Trojan=y
 EOF
           make defconfig
 
-      # 6️⃣ 编译 rootfs
+      # 6️⃣ Build rootfs
       - name: Build rootfs
         run: |
           cd project/friendlywrt
           make download -j$(nproc)
           make -j$(nproc) || make -j1 V=s
 
-      # 7️⃣ 编译 SD 镜像
+      # 7️⃣ Build SD image
       - name: Build SD image
         run: |
           cd project
@@ -93,7 +92,7 @@ EOF
           cd ../artifact
           gzip -9 $FILENAME
 
-      # 8️⃣ 上传 artifact
+      # 8️⃣ Upload artifact
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
