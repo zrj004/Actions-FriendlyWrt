@@ -80,22 +80,22 @@ jobs:
           cd friendlywrt
           make -j$JOBS V=sc tools/compile
 
-      - name: Compile target/linux
+      - name: Compile target/linux (kernel)
         run: |
           cd friendlywrt
           make -j$JOBS V=sc target/compile
 
-      - name: Compile packages
+      - name: Compile packages (SSR, Passwall, Docker)
         run: |
           cd friendlywrt
           make -j$JOBS V=sc package/compile
 
-      - name: Build firmware image
+      - name: Build SD firmware image
         run: |
           cd friendlywrt
           make -j$JOBS V=sc
 
-      - name: Save cache
+      - name: Save build cache
         uses: actions/cache@v3
         with:
           path: |
