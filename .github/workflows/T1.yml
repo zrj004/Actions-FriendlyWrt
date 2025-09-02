@@ -25,15 +25,18 @@ jobs:
           cd friendlywrt
           ls -l
 
-      - name: Build NanoPi M4 Lite Image
+      - name: Build NanoPi M4 Lite Image (OpenWrt standard)
         run: |
           cd friendlywrt
+
+          # 清理旧配置
           make distclean
 
-          # 构建 NanoPi M4 默认镜像
-          ./build.sh nanopi_m4.mk
+          # 初始化 feeds
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
 
-          # 精简配置：只保留 SSR Plus、Passwall、Docker
+          # 生成精简配置
           cat > .config <<EOF
           CONFIG_TARGET_rockchip=y
           CONFIG_TARGET_rockchip_armv8=y
@@ -50,13 +53,13 @@ jobs:
           CONFIG_PACKAGE_luci-app-ssr-plus=y
           CONFIG_PACKAGE_luci-app-passwall=y
 
-          # Docker 支持
+          # Docker
           CONFIG_PACKAGE_docker=y
           CONFIG_PACKAGE_dockerd=y
           CONFIG_PACKAGE_luci-app-dockerman=y
           CONFIG_PACKAGE_luci-lib-docker=y
 
-          # 关闭不必要的模块
+          # 关闭不必要模块
           #CONFIG_PACKAGE_ppp=n
           #CONFIG_PACKAGE_pppoe=n
           #CONFIG_PACKAGE_samba4-server=n
@@ -71,5 +74,5 @@ jobs:
         with:
           name: NanoPi-M4-FriendlyWrt-Lite
           path: |
-            friendlywrt/out/*.img*
-            friendlywrt/bin/targets/**/*.img*
+            friendlywrt/bin/targets/rockchip/armv8/*.img*
+            friendlywrt/bin/targets/rockchip/armv8/*.img*.gz
