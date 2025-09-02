@@ -1,4 +1,4 @@
-name: Build FriendlyWrt NanoPi M4 Lite (Auto Threads)
+name: Build FriendlyWrt NanoPi M4 Lite (Optimized Logs)
 
 on:
   workflow_dispatch:
@@ -86,25 +86,25 @@ jobs:
           fi
           echo "JOBS=$JOBS" >> $GITHUB_ENV
 
-      - name: Compile host tools
+      - name: Compile host tools (optimized logs)
         run: |
           cd friendlywrt
-          make -j$JOBS V=s tools/compile
+          make -j$JOBS V=sc tools/compile
 
-      - name: Compile target/linux
+      - name: Compile target/linux (optimized logs)
         run: |
           cd friendlywrt
-          make -j$JOBS V=s target/compile
+          make -j$JOBS V=sc target/compile
 
-      - name: Compile packages
+      - name: Compile packages (optimized logs)
         run: |
           cd friendlywrt
-          make -j$JOBS V=s package/compile
+          make -j$JOBS V=sc package/compile
 
-      - name: Build full firmware image
+      - name: Build full firmware image (optimized logs)
         run: |
           cd friendlywrt
-          make -j$JOBS V=s
+          make -j$JOBS V=sc
 
       - name: Upload SD Image
         uses: actions/upload-artifact@v4
