@@ -29,8 +29,7 @@ jobs:
         with:
           name: NanoPi-M4-images
           path: artifact
-          # allow-no-artifact: true 避免第一次没有 artifact 时报错
-          if-no-artifact: continue
+        continue-on-error: true
 
       - name: Check if image already exists
         id: check_image
