@@ -23,21 +23,33 @@ jobs:
           sudo cp repo/repo /usr/bin/
           mkdir -p artifact project/friendlywrt
 
-      - name: Cache downloads and host build
-        uses: actions/cache@v3
+      - name: Restore previous artifact (if exists)
+        id: restore_artifact
+        uses: actions/download-artifact@v4
         with:
-          path: |
-            project/friendlywrt/dl
-            project/friendlywrt/build_dir/host
-          key: friendlywrt-dl-build
-          restore-keys: friendlywrt-dl-build
+          name: NanoPi-M4-images
+          path: artifact
+          # allow-no-artifact: true 避免第一次没有 artifact 时报错
+          if-no-artifact: continue
+
+      - name: Check if image already exists
+        id: check_image
+        run: |
+          [ "${{ matrix.SET }}" = "docker" ] && SUFFIX="-docker" || SUFFIX=""
+          FILENAME=NanoPi-M4-FriendlyWrt-24.10${SUFFIX}.img.gz
+          if [ -f artifact/$FILENAME ]; then
+            echo "Image $FILENAME already exists, skipping build."
+            echo "skip_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip_build=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Download source (rk3399, v24.10)
+        if: steps.check_image.outputs.skip_build == 'false'
         run: |
           cd project
           repo init --depth=1 -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v24.10 \
                    -m rk3399.xml --repo-url=https://github.com/friendlyarm/repo --no-clone-bundle
-          # 只同步必要 repo，提高效率
           repo sync -c friendlywrt --no-clone-bundle
           repo sync -c kernel --no-clone-bundle
           repo sync -c u-boot --no-clone-bundle
@@ -45,6 +57,7 @@ jobs:
           repo sync -c device/friendlyelec --no-clone-bundle
 
       - name: Add Passwall
+        if: steps.check_image.outputs.skip_build == 'false'
         run: |
           cd project/friendlywrt
           echo 'src-git passwall https://github.com/xiaorouji/openwrt-passwall' >> feeds.conf.default
@@ -54,22 +67,32 @@ jobs:
           echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y" >> .config
           make defconfig
 
-      - name: Build rootfs
+      - name: Build rootfs (incremental)
+        if: steps.check_image.outputs.skip_build == 'false'
         run: |
           cd project/friendlywrt
           make download -j$(nproc)
           make -j$(nproc) || make -j1 V=s
 
-      - name: Build image
+      - name: Build SD image
+        if: steps.check_image.outputs.skip_build == 'false'
         run: |
           cd project/friendlywrt
           [ "${{ matrix.SET }}" = "docker" ] && SUFFIX="-docker" || SUFFIX=""
           FILENAME=NanoPi-M4-FriendlyWrt-24.10${SUFFIX}.img
-          echo "TARGET_IMAGE_DIRNAME=friendlywrt24${SUFFIX}" > .current_config.mk
-          echo "TARGET_FRIENDLYWRT_CONFIG=rockchip${SUFFIX}" >> .current_config.mk
-          echo "TARGET_SD_RAW_FILENAME=$FILENAME" >> .current_config.mk
-          ./build.sh sd-img
-          mv out/$FILENAME ../../artifact/
+          
+          echo "CONFIG_TARGET_IMAGE_NAME=$FILENAME" >> .config
+          echo "CONFIG_TARGET_IMAGE_SD=y" >> .config
+          make defconfig
+          make -j$(nproc) || make -j1 V=s
+
+          mkdir -p ../../artifact
+          IMG_PATH=$(find bin/targets/rockchip/ -name "$FILENAME" | head -n1)
+          if [ -z "$IMG_PATH" ]; then
+            echo "Error: SD image not found"
+            exit 1
+          fi
+          mv "$IMG_PATH" ../../artifact/
           cd ../../artifact
           gzip -9 $FILENAME
 
