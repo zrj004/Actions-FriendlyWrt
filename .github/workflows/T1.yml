@@ -1,4 +1,4 @@
-name: Build FriendlyWrt NanoPi M4 (Docker)
+name: Build FriendlyWrt NanoPi M4 (Docker Inline)
 
 on:
   workflow_dispatch:
@@ -11,27 +11,28 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v3
 
-    - name: Create Dockerfile
+    - name: Create artifact directory
+      run: mkdir -p artifact
+
+    - name: Build Docker image (inline Dockerfile)
       run: |
-        cat > Dockerfile <<'EOF'
+        cat <<'EOF' > Dockerfile
         FROM ubuntu:22.04
         ENV DEBIAN_FRONTEND=noninteractive
 
-        # 安装依赖
         RUN apt-get update && apt-get install -y \
             build-essential git wget flex bison gawk gcc-multilib g++-multilib gettext \
             libncurses5-dev libssl-dev python3-distutils python3-setuptools python3-pip \
-            python3-pyelftools m4 automake autoconf unzip rsync file curl sudo ca-certificates \
+            python3-pyelftools m4 automake autoconf unzip rsync file curl ca-certificates \
             && rm -rf /var/lib/apt/lists/*
 
         WORKDIR /work
 
-        # 克隆 FriendlyWrt 仓库
         RUN git clone --depth=1 -b master-v24.10 https://github.com/friendlyarm/friendlywrt.git friendlywrt
-
         WORKDIR /work/friendlywrt
 
-        # 生成精简配置（NanoPi M4 + SSR Plus + Passwall + Docker）
+        RUN ./scripts/feeds update -a && ./scripts/feeds install -a
+
         RUN echo "CONFIG_TARGET_rockchip=y" > .config && \
             echo "CONFIG_TARGET_rockchip_armv8=y" >> .config && \
             echo "CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-m4=y" >> .config && \
@@ -52,11 +53,7 @@ jobs:
         RUN make defconfig
         EOF
 
-    - name: Build Docker image
-      run: docker build -t friendlywrt-builder -f Dockerfile .
-
-    - name: Create artifact directory
-      run: mkdir -p artifact
+        docker build -t friendlywrt-builder .
 
     - name: Compile FriendlyWrt inside Docker
       run: |
@@ -65,10 +62,9 @@ jobs:
           -v ${{ github.workspace }}/artifact:/work/artifact \
           friendlywrt-builder \
           bash -c "
+            cd /work/friendlywrt
             export PATH=/work/friendlywrt/staging_dir/host/bin:\$PATH
-            echo '编译 host 工具链'
-            make tools/compile -j$(nproc)
-            echo '增量编译 target + 插件'
+            echo '开始编译 target + 插件'
             NPROC=\$(nproc)
             if [ \$NPROC -gt 4 ]; then JOBS=4; else JOBS=\$NPROC; fi
             make -j\$JOBS V=sc
