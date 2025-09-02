@@ -1,0 +1,258 @@
+name: Build FriendlyWrt for NanoPi M4 (RK3399)
+
+on:
+  watch:
+    types: started
+
+jobs:
+  prepare_release:
+    runs-on: ubuntu-22.04
+    if: github.event.repository.owner.id == github.event.sender.id
+    outputs:
+      release_tag: ${{ steps.release_tag.outputs.release_tag }}
+      upload_url: ${{ steps.release.outputs.upload_url }}
+    steps:
+      - name: Get release tag
+        id: release_tag
+        run: |
+          echo "release_tag=FriendlyWrt-$(date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Create empty release
+        id: release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.release_tag.outputs.release_tag }}
+          draft: false
+          prerelease: false
+
+  build_friendlywrt:
+    needs: prepare_release
+    runs-on: ubuntu-22.04
+    if: github.event.repository.owner.id == github.event.sender.id
+    strategy:
+      matrix:
+        VERSION: ['23.05', '24.10']
+        SET: [docker, non-docker]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@main
+
+      - name: Init build env (minimal)
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d
+          wget https://raw.githubusercontent.com/friendlyarm/build-env-on-ubuntu-bionic/master/install.sh
+          # 砍掉用不到的 OpenJDK/老工具链解包逻辑，尽量精简
+          sed -i -e 's/^apt-get -y install openjdk-8-jdk/# apt-get -y install openjdk-8-jdk/g' install.sh
+          sed -i -e 's/^\[ -d fa-toolchain \]/# [ -d fa-toolchain ]/g' install.sh
+          sed -i -e 's/^(cat fa-toolchain/# (cat fa-toolchain/g' install.sh
+          sed -i -e 's/^(tar xf fa-toolchain/# (tar xf fa-toolchain/g' install.sh
+          sudo -E bash ./install.sh
+          sudo -E git config --global user.name 'GitHub Actions'
+          sudo -E git config --global user.email 'noreply@github.com'
+          git clone https://github.com/friendlyarm/repo
+          sudo -E cp repo/repo /usr/bin/
+          mkdir -p ./artifact
+          sudo swapoff -a
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk /usr/local/share/boost /opt/ghc
+
+      - name: Download FriendlyWrt source (rk3399 only)
+        run: |
+          mkdir -p project && cd project
+          # 对 rootfs 只需要 friendlywrt 代码树
+          repo init --depth=1 -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v${{ matrix.VERSION }} \
+                   -m rk3399.xml --repo-url=https://github.com/friendlyarm/repo --no-clone-bundle
+          repo sync -c friendlywrt --no-clone-bundle
+          repo sync -c configs --no-clone-bundle
+          repo sync -c device/common --no-clone-bundle
+          repo sync -c device/friendlyelec --no-clone-bundle
+          repo sync -c scripts --no-clone-bundle
+          repo sync -c toolchain --no-clone-bundle
+
+      - name: Prepare dot config and feeds (NanoPi M4 + minimal)
+        run: |
+          cd project
+          # 选择 rk3399 的通用 rockchip 配置；Docker 与否通过后缀控制目录/配置
+          [ "${{ matrix.SET }}" = "docker" ] && SUFFIX="-docker" || SUFFIX=""
+          DIRNAME=friendlywrt$(echo ${{ matrix.VERSION }} | awk -F . '{print $1}')${SUFFIX}
+          CONFIG=rockchip${SUFFIX}
+          cat > .current_config.mk <<'EOL'
+          . device/friendlyelec/rk3399/base.mk
+          TARGET_IMAGE_DIRNAME=$(DIRNAME)
+          TARGET_FRIENDLYWRT_CONFIG=$(CONFIG)
+          EOL
+
+          # 进入源码树以修改 feeds / .config
+          ./build.sh friendlywrt
+          cd friendlywrt
+
+          # 只增加 SSR Plus+；引入 fw876/helloworld 源并安装 luci-app-ssr-plus
+          # 保持极简，不引入 Passwall
+          if ! grep -q "helloworld" feeds.conf.default 2>/dev/null; then
+            echo 'src-git helloworld https://github.com/fw876/helloworld' >> feeds.conf.default
+          fi
+          ./scripts/feeds update helloworld
+          ./scripts/feeds install -a -p helloworld
+
+          # 开启 luci-app-ssr-plus 与其核心依赖（自动解决）
+          # 其他包保持默认，避免膨胀
+          echo "CONFIG_PACKAGE_luci-app-ssr-plus=y" >> .config
+          # 关闭不必要的大包以缩短时间（可按需追加）
+          make defconfig
+
+      - name: Download pkgs (retry small files)
+        run: |
+          cd project/friendlywrt
+          make download -j8
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: Compile FriendlyWrt rootfs
+        id: compile
+        continue-on-error: true
+        run: |
+          cd project/friendlywrt
+          make -j"$(nproc)" || make -j1 V=s
+          echo $?
+
+      - name: Retry on failure (verbose)
+        if: steps.compile.outcome == 'failure'
+        run: |
+          cd project/friendlywrt
+          make -j1 V=s
+
+      - name: Create rootfs package
+        id: create_rootfs_package
+        run: |
+          cd project
+          . .current_config.mk
+          [ "${{ matrix.SET }}" = "docker" ] && SUFFIX="-docker" || SUFFIX=""
+          rootfs_filename="rootfs-friendlywrt-${{ matrix.VERSION }}${SUFFIX}.tgz"
+          tar czf ../artifact/${rootfs_filename} ${FRIENDLYWRT_SRC}/${FRIENDLYWRT_ROOTFS} \
+            ${FRIENDLYWRT_SRC}/${FRIENDLYWRT_PACKAGE_DIR}
+          echo "rootfs_filename=${rootfs_filename}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload rootfs to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ./artifact/${{ steps.create_rootfs_package.outputs.rootfs_filename }}
+          asset_name: ${{ steps.create_rootfs_package.outputs.rootfs_filename }}
+          tag: ${{ needs.prepare_release.outputs.release_tag }}
+          overwrite: true
+
+  build_img:
+    needs: [prepare_release, build_friendlywrt]
+    runs-on: ubuntu-22.04
+    if: github.event.repository.owner.id == github.event.sender.id
+    strategy:
+      matrix:
+        VERSION: ['23.05', '24.10']
+        SET: [docker, non-docker]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@main
+
+      - name: Init build env (image)
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d
+          wget https://raw.githubusercontent.com/friendlyarm/build-env-on-ubuntu-bionic/master/install.sh
+          sed -i -e 's/^apt-get -y install openjdk-8-jdk/# apt-get -y install openjdk-8-jdk/g' install.sh
+          sed -i -e 's/^\[ -d fa-toolchain \]/# [ -d fa-toolchain ]/g' install.sh
+          sed -i -e 's/^(cat fa-toolchain/# (cat fa-toolchain/g' install.sh
+          sed -i -e 's/^(tar xf fa-toolchain/# (tar xf fa-toolchain/g' install.sh
+          sudo -E bash ./install.sh
+          sudo -E git config --global user.name 'GitHub Actions'
+          sudo -E git config --global user.email 'noreply@github.com'
+          git clone https://github.com/friendlyarm/repo
+          sudo -E cp repo/repo /usr/bin/
+          mkdir -p ./artifact
+          sudo swapoff -a
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk /usr/local/share/boost /opt/ghc
+
+      - name: Download base (kernel/u-boot/rkbin + scripts)
+        run: |
+          mkdir -p project && cd project
+          repo init --depth=1 -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v${{ matrix.VERSION }} \
+                   -m rk3399.xml --repo-url=https://github.com/friendlyarm/repo --no-clone-bundle
+          repo sync -c kernel --no-clone-bundle
+          repo sync -c u-boot --no-clone-bundle
+          repo sync -c rkbin --no-clone-bundle
+          repo sync -c configs --no-clone-bundle
+          repo sync -c device/common --no-clone-bundle
+          repo sync -c device/friendlyelec --no-clone-bundle
+          repo sync -c scripts --no-clone-bundle
+          repo sync -c scripts/sd-fuse --no-clone-bundle
+          repo sync -c toolchain --no-clone-bundle
+
+      - name: Download friendlywrt rootfs (non-docker)
+        if: matrix.SET == 'non-docker'
+        uses: robinraju/release-downloader@v1.6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          repository: ${{ github.repository }}
+          tag: ${{ needs.prepare_release.outputs.release_tag }}
+          fileName: "rootfs-friendlywrt-${{ matrix.VERSION }}.tgz"
+
+      - name: Download friendlywrt rootfs (docker)
+        if: matrix.SET == 'docker'
+        uses: robinraju/release-downloader@v1.6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          repository: ${{ github.repository }}
+          tag: ${{ needs.prepare_release.outputs.release_tag }}
+          fileName: "rootfs-friendlywrt-${{ matrix.VERSION }}-docker.tgz"
+
+      - name: Prepare image config (NanoPi M4)
+        id: config
+        run: |
+          cd project
+          # RK3399 固定；命名为 NanoPi-M4，便于区分
+          MODEL=NanoPi-M4
+          [ "${{ matrix.SET }}" = "docker" ] && SUFFIX="-docker" || SUFFIX=""
+          FILENAME=${MODEL}-FriendlyWrt-${{ matrix.VERSION }}${SUFFIX}.img
+          DIRNAME=friendlywrt$(echo ${{ matrix.VERSION }} | awk -F . '{print $1}')${SUFFIX}
+          CONFIG=rockchip${SUFFIX}
+          cat > .current_config.mk <<EOL
+          . device/friendlyelec/rk3399/base.mk
+          TARGET_IMAGE_DIRNAME=${DIRNAME}
+          TARGET_FRIENDLYWRT_CONFIG=${CONFIG}
+          TARGET_SD_RAW_FILENAME=${FILENAME}
+          EOL
+          echo "img_filename=${FILENAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Unpack friendlywrt rootfs
+        run: |
+          cd project
+          [ "${{ matrix.SET }}" = "docker" ] && SUFFIX="-docker" || SUFFIX=""
+          tar xzf "../rootfs-friendlywrt-${{ matrix.VERSION }}${SUFFIX}.tgz"
+
+      - name: Build u-boot & kernel
+        run: |
+          cd project
+          ./build.sh uboot
+          ./build.sh kernel
+
+      - name: Build SD image
+        run: |
+          cd project
+          ./build.sh sd-img
+          mv out/${{ steps.config.outputs.img_filename }} ../artifact/
+          cd ../artifact && gzip -9 "${{ steps.config.outputs.img_filename }}"
+
+      - name: Upload image to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ./artifact/${{ steps.config.outputs.img_filename }}.gz
+          asset_name: ${{ steps.config.outputs.img_filename }}.gz
+          tag: ${{ needs.prepare_release.outputs.release_tag }}
+          overwrite: true
