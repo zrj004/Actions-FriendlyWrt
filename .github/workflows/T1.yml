@@ -22,12 +22,16 @@ jobs:
             python3-pyelftools m4 automake autoconf unzip rsync file curl sudo ca-certificates \
             && rm -rf /var/lib/apt/lists/*
         WORKDIR /work
+
+        # 克隆 FriendlyWrt 仓库
         RUN git clone --depth=1 -b master-v24.10 https://github.com/friendlyarm/friendlywrt.git friendlywrt
-        ENV PATH=/work/friendlywrt/staging_dir/host/bin:$PATH
-        ENV JOBS=4
-        RUN mkdir -p /work/friendlywrt/downloads /work/friendlywrt/build_dir/host /work/artifact
+
         WORKDIR /work/friendlywrt
-        RUN cp configs/nanopi_m4_defconfig .config && \
+
+        # 创建精简配置，针对 NanoPi M4
+        RUN echo "CONFIG_TARGET_rockchip=y" > .config && \
+            echo "CONFIG_TARGET_rockchip_armv8=y" >> .config && \
+            echo "CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-m4=y" >> .config && \
             cat >> .config <<'CFG'
         CONFIG_PACKAGE_luci-app-ssr-plus=y
         CONFIG_PACKAGE_luci-app-passwall=y
@@ -40,6 +44,7 @@ jobs:
         CONFIG_PACKAGE_luci-app-dockerman=y
         CONFIG_PACKAGE_luci-lib-docker=y
         CFG
+
         RUN make defconfig
         EOF
 
