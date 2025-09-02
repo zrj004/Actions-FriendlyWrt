@@ -1,4 +1,4 @@
-name: Build FriendlyWrt NanoPi M4 (Lite)
+name: Build FriendlyWrt NanoPi M4 Lite
 
 on:
   workflow_dispatch:
@@ -17,22 +17,24 @@ jobs:
           sudo apt-get install -y \
             build-essential flex bison gawk gcc-multilib g++-multilib \
             gettext libncurses5-dev libssl-dev python3-distutils \
-            python3-setuptools rsync unzip file wget git curl repo
+            python3-setuptools rsync unzip file wget git curl
 
-      - name: Download FriendlyWrt source
+      - name: Clone FriendlyWrt
         run: |
-          mkdir friendlywrt
+          git clone https://github.com/friendlyarm/friendlywrt.git friendlywrt
           cd friendlywrt
-          repo init -u https://github.com/friendlyarm/friendlywrt_manifests.git -b master -m nanopi_m4.xml
-          repo sync -c --no-tags --no-clone-bundle -j$(nproc)
+          ls -l
 
       - name: Build NanoPi M4 Lite Image
         run: |
           cd friendlywrt
+          make distclean
+
+          # 构建 NanoPi M4 默认镜像
           ./build.sh nanopi_m4.mk
 
           # 精简配置：只保留 SSR Plus、Passwall、Docker
-          cat > friendlywrt/.config <<EOF
+          cat > .config <<EOF
           CONFIG_TARGET_rockchip=y
           CONFIG_TARGET_rockchip_armv8=y
           CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-m4=y
@@ -48,20 +50,19 @@ jobs:
           CONFIG_PACKAGE_luci-app-ssr-plus=y
           CONFIG_PACKAGE_luci-app-passwall=y
 
-          # Docker
+          # Docker 支持
           CONFIG_PACKAGE_docker=y
           CONFIG_PACKAGE_dockerd=y
           CONFIG_PACKAGE_luci-app-dockerman=y
           CONFIG_PACKAGE_luci-lib-docker=y
 
-          # 关闭不必要的模块，减小体积
+          # 关闭不必要的模块
           #CONFIG_PACKAGE_ppp=n
           #CONFIG_PACKAGE_pppoe=n
           #CONFIG_PACKAGE_samba4-server=n
           #CONFIG_PACKAGE_wpad-basic=n
           EOF
 
-          cd friendlywrt
           make defconfig
           make -j$(nproc)
 
