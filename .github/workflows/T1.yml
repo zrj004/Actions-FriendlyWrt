@@ -1,4 +1,4 @@
-name: Build FriendlyWrt NanoPi M4
+name: Build FriendlyWrt NanoPi M4 (Docker)
 
 on:
   workflow_dispatch:
@@ -11,77 +11,32 @@ jobs:
     - name: Checkout source
       uses: actions/checkout@v3
 
-    - name: Install dependencies
+    - name: Build Docker image for FriendlyWrt
       run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          build-essential git wget flex bison gawk gcc-multilib g++-multilib gettext \
-          libncurses5-dev libssl-dev python3-distutils python3-setuptools python3-pip \
-          python3-pyelftools m4 automake autoconf unzip rsync file curl
+        docker build -t friendlywrt-builder -f Dockerfile .
 
-    - name: Prepare directories
+    - name: Create artifact directory
+      run: mkdir -p artifact
+
+    - name: Compile FriendlyWrt inside Docker
       run: |
-        mkdir -p friendlywrt/downloads friendlywrt/build_dir/host friendlywrt/staging_dir artifact
-
-    - name: Cache build
-      uses: actions/cache@v3
-      with:
-        path: |
-          friendlywrt/staging_dir
-          friendlywrt/build_dir/host
-          friendlywrt/downloads
-        key: friendlywrt-build-cache
-
-    - name: Init FriendlyWrt repo
-      run: |
-        cd friendlywrt
-        repo init --depth=1 -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v24.10
-        repo sync -c friendlywrt --no-clone-bundle
-        repo sync -c kernel --no-clone-bundle
-        repo sync -c u-boot --no-clone-bundle
-        repo sync -c toolchain --no-clone-bundle
-        repo sync -c device/friendlyelec --no-clone-bundle
-
-    - name: Generate default config (NanoPi M4)
-      run: |
-        cd friendlywrt
-        make distclean || true
-        cp configs/nanopi_m4_defconfig .config
-        # 添加 SSR Plus + Passwall + Docker
-        cat >> .config <<EOF
-CONFIG_PACKAGE_luci-app-ssr-plus=y
-CONFIG_PACKAGE_luci-app-passwall=y
-CONFIG_PACKAGE_luci-compat=y
-CONFIG_PACKAGE_luci-lib-ipkg=y
-CONFIG_PACKAGE_ipset=y
-CONFIG_PACKAGE_ip-full=y
-CONFIG_PACKAGE_docker=y
-CONFIG_PACKAGE_dockerd=y
-CONFIG_PACKAGE_luci-app-dockerman=y
-CONFIG_PACKAGE_luci-lib-docker=y
-EOF
-        make defconfig
-
-    - name: Compile host tools (incremental)
-      run: |
-        cd friendlywrt
-        make tools/compile -j$(nproc)
-        export PATH=$(pwd)/staging_dir/host/bin:$PATH
-
-    - name: Compile target (incremental)
-      run: |
-        cd friendlywrt
-        NPROC=$(nproc)
-        if [ "$NPROC" -gt 4 ]; then JOBS=4; else JOBS=$NPROC; fi
-        make -j$JOBS V=sc
-
-    - name: Move artifact
-      run: |
-        cd friendlywrt
-        FILENAME=NanoPi-M4-FriendlyWrt-24.10.img
-        mv bin/targets/rockchip/armv8/$FILENAME ../artifact/ || true
-        cd ../artifact
-        gzip -9 $FILENAME || true
+        docker run --rm -it \
+          -v ${{ github.workspace }}/friendlywrt:/work/friendlywrt \
+          -v ${{ github.workspace }}/artifact:/work/artifact \
+          friendlywrt-builder \
+          bash -c "
+            export PATH=/work/friendlywrt/staging_dir/host/bin:\$PATH
+            echo '编译 host 工具链'
+            make tools/compile -j$(nproc)
+            echo '增量编译 target + 插件'
+            NPROC=\$(nproc)
+            if [ \$NPROC -gt 4 ]; then JOBS=4; else JOBS=\$NPROC; fi
+            make -j\$JOBS V=sc
+            echo '打包 SD 镜像'
+            FILENAME=NanoPi-M4-FriendlyWrt-24.10.img
+            mv bin/targets/rockchip/armv8/\$FILENAME /work/artifact/ || true
+            cd /work/artifact && gzip -9 \$FILENAME || true
+          "
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
