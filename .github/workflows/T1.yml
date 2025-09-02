@@ -1,4 +1,4 @@
-name: Build FriendlyWrt NanoPi M4 Lite
+name: Build FriendlyWrt NanoPi M4 Lite (Stable)
 
 on:
   workflow_dispatch:
@@ -30,11 +30,9 @@ jobs:
           cd friendlywrt
           ls -l
 
-      - name: Build NanoPi M4 Lite Image
+      - name: Prepare config for NanoPi M4 Lite
         run: |
           cd friendlywrt
-
-          # 清理旧配置
           make distclean
 
           # 初始化 feeds
@@ -72,7 +70,21 @@ jobs:
           EOF
 
           make defconfig
-          make -j$(nproc)
+
+      - name: Compile target/linux (single thread)
+        run: |
+          cd friendlywrt
+          make target/compile V=s -j1
+
+      - name: Compile packages (single thread)
+        run: |
+          cd friendlywrt
+          make package/compile V=s -j1
+
+      - name: Build full firmware image (single thread)
+        run: |
+          cd friendlywrt
+          make -j1 V=s
 
       - name: Upload SD Image
         uses: actions/upload-artifact@v4
