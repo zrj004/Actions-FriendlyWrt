@@ -1,4 +1,4 @@
-name: Build FriendlyWrt for NanoPi M4
+name: Build FriendlyWrt SD Image
 
 on:
   workflow_dispatch:
@@ -7,86 +7,47 @@ jobs:
   build:
     runs-on: ubuntu-22.04
 
-    strategy:
-      matrix:
-        SET: [docker, non-docker]
-
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Init build env
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git wget build-essential python3 unzip rsync ccache
-          git clone https://github.com/friendlyarm/repo
-          sudo cp repo/repo /usr/bin/
-          mkdir -p artifact project/friendlywrt
+          sudo apt-get install -y git wget build-essential python3 unzip rsync ccache \
+            parted dosfstools e2fsprogs fdisk kmod
 
-      - name: Restore previous artifact (if exists)
-        id: restore_artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: NanoPi-M4-images
-          path: artifact
-        continue-on-error: true
-
-      - name: Check if image already exists
-        id: check_image
+      - name: Clone FriendlyWrt
         run: |
-          [ "${{ matrix.SET }}" = "docker" ] && SUFFIX="-docker" || SUFFIX=""
-          FILENAME=NanoPi-M4-FriendlyWrt-24.10${SUFFIX}.img.gz
-          if [ -f artifact/$FILENAME ]; then
-            echo "skip_build=true" >> $GITHUB_OUTPUT
-          else
-            echo "skip_build=false" >> $GITHUB_OUTPUT
-          fi
+          git clone --depth=1 https://github.com/friendlyarm/friendlywrt project/friendlywrt
 
-      - name: Download source (rk3399, v24.10)
-        if: steps.check_image.outputs.skip_build == 'false'
-        run: |
-          cd project
-          repo init --depth=1 -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v24.10 \
-                   -m rk3399.xml --repo-url=https://github.com/friendlyarm/repo --no-clone-bundle
-          repo sync -c friendlywrt --no-clone-bundle
-          repo sync -c kernel --no-clone-bundle
-          repo sync -c u-boot --no-clone-bundle
-          repo sync -c toolchain --no-clone-bundle
-          repo sync -c device/friendlyelec --no-clone-bundle
-
-      - name: Add Passwall
-        if: steps.check_image.outputs.skip_build == 'false'
+      - name: Prepare config
         run: |
           cd project/friendlywrt
-          echo 'src-git passwall https://github.com/xiaorouji/openwrt-passwall' >> feeds.conf.default
-          ./scripts/feeds update passwall
-          ./scripts/feeds install luci-app-passwall luci-i18n-passwall-zh-cn
-          echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
-          echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y" >> .config
+          cp configs/config_nanopi_m4_defconfig .config
+          # 强制启用 SD 镜像选项
+          echo "CONFIG_TARGET_IMAGES=y" >> .config
+          echo "CONFIG_TARGET_IMAGE_SD=y" >> .config
           make defconfig
 
-      - name: Build rootfs and SD image (incremental)
-        if: steps.check_image.outputs.skip_build == 'false'
+      - name: Build
         run: |
           cd project/friendlywrt
-          make download -j$(nproc)
           make -j$(nproc) || make -j1 V=s
 
-          mkdir -p ../../artifact
-          # 查找生成的 SD 镜像
-          IMG_PATH=$(find bin/targets/rockchip/ -name "*-sdcard.img" | head -n1)
+      - name: Find SD Image
+        run: |
+          cd project/friendlywrt
+          IMG_PATH=$(find bin/targets/rockchip/ -type f -name "*-sdcard.img" | head -n1 || true)
           if [ -z "$IMG_PATH" ]; then
-            echo "Error: SD image not found"
+            echo "❌ No SD image found!"
+            ls -R bin/targets || true
             exit 1
           fi
-          # 移动并重命名镜像
-          [ "${{ matrix.SET }}" = "docker" ] && SUFFIX="-docker" || SUFFIX=""
-          mv "$IMG_PATH" ../../artifact/NanoPi-M4-FriendlyWrt-24.10${SUFFIX}.img
-          cd ../../artifact
-          gzip -9 NanoPi-M4-FriendlyWrt-24.10${SUFFIX}.img
+          echo "IMG_PATH=$IMG_PATH" >> $GITHUB_ENV
 
-      - name: Upload artifact
+      - name: Upload SD Image
         uses: actions/upload-artifact@v4
         with:
-          name: NanoPi-M4-images
-          path: artifact/*.img.gz
+          name: FriendlyWrt-SDImage
+          path: ${{ env.IMG_PATH }}
