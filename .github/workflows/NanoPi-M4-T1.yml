@@ -23,6 +23,7 @@ jobs:
           name: ${{ steps.release_tag.outputs.tag }}
           draft: false
           prerelease: false
+
     outputs:
       release_tag: ${{ steps.release_tag.outputs.tag }}
       upload_url: ${{ steps.release.outputs.upload_url }}
@@ -35,10 +36,12 @@ jobs:
         SET: [docker, non-docker]
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@main
+      # 1️⃣ Checkout
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-      - name: Init build environment
+      # 2️⃣ 初始化环境
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y git wget build-essential python3 unzip rsync
@@ -46,6 +49,7 @@ jobs:
           sudo cp repo/repo /usr/bin/
           mkdir -p artifact
 
+      # 3️⃣ 下载 FriendlyWrt 源码
       - name: Download source (rk3399, v24.10)
         run: |
           mkdir project && cd project
@@ -62,7 +66,8 @@ jobs:
           repo sync -c scripts/sd-fuse --no-clone-bundle
           repo sync -c toolchain --no-clone-bundle
 
-      - name: Configure feeds (passwall)
+      # 4️⃣ 配置 feeds（passwall）
+      - name: Configure feeds
         run: |
           cd project/friendlywrt
           cat > feeds.conf.default <<EOF
@@ -76,6 +81,7 @@ EOF
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
+      # 5️⃣ 准备最小 .config
       - name: Prepare minimal config with passwall
         run: |
           cd project/friendlywrt
@@ -94,12 +100,14 @@ CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Trojan=y
 EOF
           make defconfig
 
+      # 6️⃣ 编译 rootfs & SD 镜像
       - name: Build rootfs & SD image
         run: |
           cd project/friendlywrt
           make download -j$(nproc)
           make -j$(nproc) || make -j1 V=s
 
+          # 设置 docker / non-docker
           [ "${{ matrix.SET }}" = "docker" ] && SUFFIX="-docker" || SUFFIX=""
           FILENAME=NanoPi-M4-FriendlyWrt-24.10${SUFFIX}.img
           echo "TARGET_IMAGE_DIRNAME=friendlywrt24${SUFFIX}" > .current_config.mk
@@ -110,6 +118,7 @@ EOF
           cd ../artifact
           gzip -9 $FILENAME
 
+      # 7️⃣ 上传到 Release
       - name: Upload SD image to release
         uses: svenstaro/upload-release-action@v2
         with:
