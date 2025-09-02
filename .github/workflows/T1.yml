@@ -1,85 +1,66 @@
-name: Build FriendlyWrt for NanoPi M4 (Passwall)
+name: Build FriendlyWrt for NanoPi M4
 
 on:
   workflow_dispatch:
 
 jobs:
-  build_friendlywrt:
+  build:
     runs-on: ubuntu-22.04
+
     strategy:
       matrix:
         SET: [docker, non-docker]
 
     steps:
-      # 1️⃣ Checkout repository
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@main
 
-      # 2️⃣ Setup build environment
       - name: Init build env
         run: |
           sudo apt-get update
-          sudo apt-get install -y git wget build-essential python3 unzip rsync
+          sudo apt-get install -y git wget build-essential python3 unzip rsync ccache
           git clone https://github.com/friendlyarm/repo
           sudo cp repo/repo /usr/bin/
-          mkdir -p artifact
+          mkdir -p artifact project/friendlywrt
 
-      # 3️⃣ Download FriendlyWrt source
-      - name: Download source
+      - name: Cache downloads and host build
+        uses: actions/cache@v3
+        with:
+          path: |
+            project/friendlywrt/dl
+            project/friendlywrt/build_dir/host
+          key: friendlywrt-dl-build
+          restore-keys: friendlywrt-dl-build
+
+      - name: Download source (rk3399, v24.10)
         run: |
-          mkdir project && cd project
+          cd project
           repo init --depth=1 -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v24.10 \
                    -m rk3399.xml --repo-url=https://github.com/friendlyarm/repo --no-clone-bundle
+          # 只同步必要 repo，提高效率
           repo sync -c friendlywrt --no-clone-bundle
           repo sync -c kernel --no-clone-bundle
           repo sync -c u-boot --no-clone-bundle
-          repo sync -c rkbin --no-clone-bundle
-          repo sync -c configs --no-clone-bundle
-          repo sync -c device/common --no-clone-bundle
-          repo sync -c device/friendlyelec --no-clone-bundle
-          repo sync -c scripts --no-clone-bundle
-          repo sync -c scripts/sd-fuse --no-clone-bundle
           repo sync -c toolchain --no-clone-bundle
+          repo sync -c device/friendlyelec --no-clone-bundle
 
-      # 4️⃣ Configure Passwall feeds
-      - name: Configure Passwall feeds
+      - name: Add Passwall
         run: |
           cd project/friendlywrt
-          grep -q 'passwall' feeds.conf.default || cat >> feeds.conf.default <<EOF
-src-git passwall_packages https://github.com/xiaorouji/openwrt-passwall-packages
-src-git passwall https://github.com/xiaorouji/openwrt-passwall
-EOF
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-
-      # 5️⃣ Prepare .config (Passwall + LuCI)
-      - name: Prepare minimal config
-        run: |
-          cd project/friendlywrt
-          grep -q 'CONFIG_PACKAGE_luci-app-passwall' .config || cat >> .config <<EOF
-CONFIG_TARGET_arm_cortex-a53=y
-CONFIG_TARGET_DEVICE_friendlyarm_nanopi-m4=y
-CONFIG_PACKAGE_luci=y
-CONFIG_PACKAGE_luci-compat=y
-CONFIG_PACKAGE_luci-base=y
-CONFIG_PACKAGE_luci-mod-admin-full=y
-CONFIG_PACKAGE_luci-theme-bootstrap=y
-CONFIG_PACKAGE_luci-app-passwall=y
-CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks=y
-CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Simple_Obfs=y
-CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Trojan=y
-EOF
+          echo 'src-git passwall https://github.com/xiaorouji/openwrt-passwall' >> feeds.conf.default
+          ./scripts/feeds update passwall
+          ./scripts/feeds install luci-app-passwall luci-i18n-passwall-zh-cn
+          echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y" >> .config
           make defconfig
 
-      # 6️⃣ Build rootfs
       - name: Build rootfs
         run: |
           cd project/friendlywrt
           make download -j$(nproc)
           make -j$(nproc) || make -j1 V=s
 
-      # 7️⃣ Build SD image
-      - name: Build SD image
+      - name: Build image
         run: |
           cd project
           [ "${{ matrix.SET }}" = "docker" ] && SUFFIX="-docker" || SUFFIX=""
@@ -92,9 +73,8 @@ EOF
           cd ../artifact
           gzip -9 $FILENAME
 
-      # 8️⃣ Upload artifact
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: NanoPi-M4-passwall-images
+          name: NanoPi-M4-images
           path: artifact/*.img.gz
