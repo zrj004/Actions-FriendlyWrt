@@ -13,11 +13,11 @@ jobs:
 
     steps:
       # 1️⃣ Checkout 仓库
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v3
 
       # 2️⃣ 初始化编译环境
-      - name: Init build env
+      - name: Setup build environment
         run: |
           sudo apt-get update
           sudo apt-get install -y git wget build-essential python3 unzip rsync
@@ -26,7 +26,7 @@ jobs:
           mkdir -p artifact
 
       # 3️⃣ 下载 FriendlyWrt 源码
-      - name: Download source (rk3399, v24.10)
+      - name: Download FriendlyWrt source
         run: |
           mkdir project && cd project
           repo init --depth=1 -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v24.10 \
@@ -42,7 +42,7 @@ jobs:
           repo sync -c scripts/sd-fuse --no-clone-bundle
           repo sync -c toolchain --no-clone-bundle
 
-      # 4️⃣ 配置 feeds（Passwall）
+      # 4️⃣ 配置 Passwall feeds
       - name: Configure Passwall feeds
         run: |
           cd project/friendlywrt
@@ -80,7 +80,7 @@ EOF
           make -j$(nproc) || make -j1 V=s
 
       # 7️⃣ 编译 SD 镜像
-      - name: Build image
+      - name: Build SD image
         run: |
           cd project
           [ "${{ matrix.SET }}" = "docker" ] && SUFFIX="-docker" || SUFFIX=""
